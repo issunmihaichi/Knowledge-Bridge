@@ -312,3 +312,57 @@ button { cursor: pointer; }
   .pg-inspector-window { left: 48px; width: auto; }
   .pg-tab { min-width: 120px; }
 }
+
+/* Alignment pass using Project Graph's published dark theme tokens. */
+.pg-shell {
+  --pg-primary: oklch(0.428 0.206 181.3);
+  --pg-bg: #171717;
+  --pg-surface: oklch(0.205 0 0);
+  --pg-border: rgba(255, 255, 255, .1);
+  grid-template-rows: 32px 25px minmax(0, 1fr);
+  background: #171717;
+}
+.pg-appmark { width: 34px; border-color: var(--pg-border); font-size: 8px; }
+.pg-titlebar { height: 32px; background: oklch(0.145 0 0); border-color: var(--pg-border); }
+.pg-titlebar nav button, .pg-window-tools button { padding-inline: 8px; font-size: 10px; }
+.pg-tabs { align-items: center; gap: 4px; padding: 0 4px; background: var(--pg-surface); border-color: var(--pg-border); }
+.pg-menu-button, .pg-tab, .pg-lens { height: 22px; gap: 6px; font-size: 10px; }
+.pg-tab { min-width: 138px; padding: 0 8px; border: 0; border-radius: 4px; opacity: .7; }
+.pg-tab.active { color: white; background: var(--pg-primary); border: 0; opacity: 1; }
+.pg-lens { height: 20px; margin-right: 2px; padding: 0 7px; border-color: var(--pg-border); background: oklch(0.269 0 0); }
+.workspace.pg-stage, .pg-stage .canvas-shell, .pg-stage .react-flow { background: #171717; }
+.pg-stage .react-flow__background { opacity: .48; }
+.pg-stage .react-flow__edge-path, .pg-stage .logical-edge .react-flow__edge-path { stroke: #cccccc; }
+.pg-stage .react-flow__edge-text { fill: #fff; }
+.pg-stage .knowledge-node {
+  border-color: #cccccc;
+  border-left-width: 2px;
+  background: #171717;
+}
+.pg-stage .role-l1, .pg-stage .role-l2, .pg-stage .role-l3, .pg-stage .role-l4 { border-color: #cccccc; }
+.pg-stage .role-l1 .node-kicker { color: #75c79d; }
+.pg-stage .role-l2 .node-kicker { color: #e7b16d; }
+.pg-stage .role-l3 .node-kicker { color: #b29bd8; }
+.pg-stage .role-l4 .node-kicker { color: #8ab8cc; }
+.pg-stage .knowledge-node.is-selected {
+  border-color: #f2f2f2;
+  background: #202020;
+  box-shadow: 0 0 0 4px rgba(34, 217, 110, .32), 0 7px 18px rgba(0, 0, 0, .32);
+}
+.pg-floating-panel {
+  border-color: var(--pg-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--pg-surface) 96%, transparent);
+}
+.pg-panel-title, .pg-floating-panel .inspector-tabs, .pg-floating-panel .vault-footer { border-color: var(--pg-border); }
+.pg-floating-panel .tree-file.active { background: var(--pg-primary); color: white; }
+.pg-floating-panel .inspector-tabs button.active { border-bottom-color: var(--pg-primary); color: white; }
+.pg-left-tools, .pg-right-tools, .pg-bottom-tools {
+  gap: 2px;
+  border-color: var(--pg-border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--pg-surface) 95%, transparent);
+}
+.pg-bottom-tools { bottom: 0; border-bottom: 0; border-radius: 10px 10px 0 0; padding: 5px 8px; }
+.pg-left-tools button.active, .pg-right-tools button.active, .pg-bottom-tools button.active { background: var(--pg-primary); color: white; }
+.pg-right-tools em { background: var(--pg-primary); }

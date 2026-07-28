@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import {
   Background,
+  BackgroundVariant,
   Handle,
   MarkerType,
   Position,
@@ -137,7 +138,7 @@ export function KnowledgeCanvas({ nodes, relations, selectedId, onSelect, onMove
         fitView
         fitViewOptions={{ padding: 0.2, maxZoom: 0.92 }}
       >
-        <Background color="#c8cbc4" gap={24} size={1} />
+        <Background variant={BackgroundVariant.Lines} color="rgba(255,255,255,.12)" gap={32} size={1} />
       </ReactFlow>
       <div className="zoom-hint">{viewport.zoom < 0.48 ? '概览层 · L3/L4 已隐藏' : '知识层 · 全部节点'}</div>
       {preview && (

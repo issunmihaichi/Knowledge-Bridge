@@ -35,8 +35,8 @@ export default function App() {
   const [tab, setTab] = useState<'note' | 'pending'>('note')
   const [layout, setLayout] = useState<Record<string, { x: number; y: number }>>()
   const [notice, setNotice] = useState<string>()
-  const [showFiles, setShowFiles] = useState(true)
-  const [showInspector, setShowInspector] = useState(true)
+  const [showFiles, setShowFiles] = useState(false)
+  const [showInspector, setShowInspector] = useState(false)
   const [canvasTool, setCanvasTool] = useState<'select' | 'draw' | 'connect'>('select')
   const abortRef = useRef<AbortController | undefined>(undefined)
 
