@@ -1,43 +1,33 @@
 # Knowledge Bridge
 
-Knowledge Bridge is a local-first knowledge graph workspace that opens an Obsidian-compatible Vault, keeps advanced graph semantics in `.knowledge-bridge/graph.db`, and drafts learning bridges without silently promoting AI output to formal knowledge.
+Knowledge Bridge is a local-first visual knowledge system for connecting familiar concepts, research terms, claims, evidence, and cross-scale explanations. Its interface and canvas are built directly on [graphif/project-graph](https://github.com/graphif/project-graph), rather than reproducing that product's visual language in a separate UI.
 
-## Run
+## Current V1 foundation
 
-```powershell
+- Project Graph's native Canvas2D renderer, tabs, floating windows, themes, menus, and toolbars
+- L1-L4 knowledge roles with separate logical and cognitive relation layers
+- evidence levels, perspective-dependent evidence tension, and scale conversion protocols
+- an isolated Pending Pool for Markdown links, lineage candidates, and AI bridge suggestions
+- stable managed Markdown links using `<!-- kb-link:edge_id -->`, including sever and retarget reconciliation
+- a native Knowledge Bridge dock with indexing state, bridge review, evidence, and migration controls
+- an initial biology graph rendered as real Project Graph nodes and edges
+
+## Development
+
+Requirements: Node.js 26+ and pnpm 11.
+
+```bash
 pnpm install
-pnpm dev
+pnpm --filter @graphif/data-structures --filter @graphif/serializer --filter @graphif/shapes run build
+pnpm --filter @knowledge-bridge/app dev --host 127.0.0.1
 ```
 
-Open [http://127.0.0.1:4173](http://127.0.0.1:4173). Chromium-based browsers are required when opening a real Vault because the browser build uses the File System Access API. The included demo Vault works in any current browser.
+The web preview runs at `http://127.0.0.1:1420/`. The Tauri desktop application uses the same frontend.
 
-```powershell
-pnpm typecheck
-pnpm test
-pnpm build
-```
+## License and upstream attribution
 
-## Storage contract
+This repository is a derivative work of Project Graph and is distributed under `GPL-3.0-only`. The upstream application and its contributors retain their original copyright. The full license is available at [`app/LICENSE`](app/LICENSE).
 
-- Markdown remains the source of truth for note content, tags, attachments, and ordinary `[[wikilinks]]`.
-- `.knowledge-bridge/graph.db` stores logical/cognitive edges, write snapshots, evidence evaluations, knowledge lenses, scale protocols, lineage candidates, frozen migrations, and the undo log.
-- KB-managed links use `[[Target]] <!-- kb-link:edge_id -->`. Deleting a managed link severs it; the scanner never recreates a severed edge without an explicit restore action.
-- Unmarked Obsidian wikilinks enter the Pending Pool as cognitive mentions and never become logical facts automatically.
+Upstream source: https://github.com/graphif/project-graph
 
-## AI provider
-
-Without configuration, the app produces clearly labeled local bridge candidates. For a local OpenAI-compatible service, set:
-
-```powershell
-$env:VITE_AI_ENDPOINT='http://127.0.0.1:1234/v1'
-$env:VITE_AI_MODEL='local-model-name'
-pnpm dev
-```
-
-The browser build intentionally does not accept a cloud API key. A distributed desktop build should keep cloud credentials behind a native Tauri command and OS credential storage.
-
-## Desktop boundary
-
-The React application and Vault adapter boundary are ready for Tauri, but this machine does not have Rust/Cargo installed, so the native shell is not compiled in this workspace. The current build is a complete browser-hosted local prototype; `BrowserVaultAdapter` is the only module that needs replacement by native file and watcher commands.
-
-Project Graph's GPL application code and assets are not included. The interface was implemented independently using `@xyflow/react`.
+Knowledge Bridge-specific changes are maintained at https://github.com/issunmihaichi/Knowledge-Bridge
