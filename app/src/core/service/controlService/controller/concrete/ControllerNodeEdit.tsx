@@ -17,9 +17,22 @@ import LatexEditWindow from "@/sub/LatexEditWindow";
  * 当有节点编辑时，会把摄像机锁定住
  */
 export class ControllerNodeEditClass extends ControllerClass {
+  private detailClickStart?: { node: TextNode; viewLocation: Vector };
+
   constructor(protected readonly project: Project) {
     super(project);
   }
+
+  mousedown = (event: MouseEvent) => {
+    this.detailClickStart = undefined;
+    if (event.button !== 0 || this.project.controller.camera.isPreGrabbingWhenSpace) return;
+
+    const pressLocation = this.project.renderer.transformView2World(new Vector(event.clientX, event.clientY));
+    const clickedEntity = this.project.stageManager.findEntityByLocation(pressLocation);
+    if (clickedEntity instanceof TextNode && clickedEntity.openDetailsOnClick) {
+      this.detailClickStart = { node: clickedEntity, viewLocation: new Vector(event.clientX, event.clientY) };
+    }
+  };
 
   mouseDoubleClick = async (event: MouseEvent) => {
     if (event.button !== 0) {
@@ -33,6 +46,11 @@ export class ControllerNodeEditClass extends ControllerClass {
     const clickedEntity = this.project.stageManager.findEntityByLocation(pressLocation);
 
     if (clickedEntity === null) {
+      return;
+    }
+
+    if (clickedEntity instanceof TextNode && clickedEntity.openDetailsOnClick) {
+      this.project.controllerUtils.editNodeDetails(clickedEntity);
       return;
     }
 
@@ -67,7 +85,8 @@ export class ControllerNodeEditClass extends ControllerClass {
       return;
     }
 
-    const pressLocation = this.project.renderer.transformView2World(new Vector(event.clientX, event.clientY));
+    const viewLocation = new Vector(event.clientX, event.clientY);
+    const pressLocation = this.project.renderer.transformView2World(viewLocation);
     for (const entity of this.project.stageManager.getEntities()) {
       // 必须有详细信息才显示详细信息按钮，进而点进去，否则会误触
       if (
@@ -79,6 +98,19 @@ export class ControllerNodeEditClass extends ControllerClass {
         return;
       }
     }
+
+    const detailClickStart = this.detailClickStart;
+    this.detailClickStart = undefined;
+    const clickedEntity = this.project.stageManager.findEntityByLocation(pressLocation);
+    if (
+      detailClickStart &&
+      clickedEntity === detailClickStart.node &&
+      viewLocation.distance(detailClickStart.viewLocation) < 6
+    ) {
+      this.project.controllerUtils.editNodeDetails(clickedEntity);
+      return;
+    }
+
     // 处理引用按钮点击事件
     this.project.referenceManager.onClickReferenceNumber(
       this.project.renderer.transformView2World(MouseLocation.vector()),
@@ -87,19 +119,12 @@ export class ControllerNodeEditClass extends ControllerClass {
 
   mousemove = (event: MouseEvent) => {
     this.project.controller.resetCountdownTimer();
-    /**
-     * 如果一直显示详细信息，则不显示鼠标悬停效果
-     */
-    if (Settings.alwaysShowDetails) {
-      return;
-    }
-
     const location = this.project.renderer.transformView2World(new Vector(event.clientX, event.clientY));
     for (const node of this.project.stageManager.getTextNodes()) {
-      node.isMouseHover = false;
-      if (node.collisionBox.isContainsPoint(location)) {
-        node.isMouseHover = true;
-      }
+      // Knowledge Bridge secondary relations must remain expandable even when
+      // normal node details are configured to stay visible.
+      const tracksHover = !Settings.alwaysShowDetails || node.uuid.startsWith("kb:node:");
+      node.isMouseHover = tracksHover && node.collisionBox.isContainsPoint(location);
     }
   };
 

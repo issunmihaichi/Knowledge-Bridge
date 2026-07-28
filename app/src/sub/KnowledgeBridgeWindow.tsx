@@ -1,17 +1,38 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { createSubWindow } from "@/core/subWindowOpen";
+import { Project } from "@/core/Project";
+import { useComponentTabResourceTab } from "@/core/Tab";
+import { loadAiConnection, saveAiConnection, type AiConnectionSettings } from "@/knowledge-bridge/aiSettings";
+import { synchronizeKnowledgeBridgeCanvas } from "@/knowledge-bridge/canvas";
 import { collectVaultFiles, indexMarkdown, toPending } from "@/knowledge-bridge/indexer";
 import { GraphLedger } from "@/knowledge-bridge/ledger";
+import { draftPaperBridge } from "@/knowledge-bridge/paperBridgeAi";
+import {
+  applyHighConfidenceMigration,
+  buildFrozenL2MigrationPreview,
+  evaluateL2Admission,
+  freezeL2,
+  relationBundles,
+} from "@/knowledge-bridge/governance";
 import {
   demoVaultSnapshot,
+  emptyVaultSnapshot,
   type IndexProgress,
+  type PaperBridgeDraft,
   type PendingMention,
   type VaultSnapshot,
 } from "@/knowledge-bridge/model";
-import { DemoVaultAdapter, pickVault, type VaultAdapter } from "@/knowledge-bridge/vault";
+import {
+  DemoVaultAdapter,
+  KNOWLEDGE_BRIDGE_LEDGER_PATH,
+  pickVault,
+  type VaultAdapter,
+} from "@/knowledge-bridge/vault";
 import { Vector } from "@graphif/data-structures";
 import { Rectangle } from "@graphif/shapes";
 import {
@@ -28,10 +49,11 @@ import {
   Scale,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 const kindLabels: Record<PendingMention["kind"], string> = {
@@ -40,6 +62,61 @@ const kindLabels: Record<PendingMention["kind"], string> = {
   lineage: "血缘候选",
   "ai-bridge": "AI 桥梁",
 };
+
+export interface KnowledgeBridgeLaunchOptions {
+  initialVaultName?: string;
+  initialInput?: string;
+  initialAnchor?: string;
+  freshStart?: boolean;
+}
+
+function createStarterSnapshot(initialAnchor?: string): VaultSnapshot {
+  const snapshot = structuredClone(emptyVaultSnapshot);
+  const anchor = initialAnchor?.trim();
+  if (!anchor) return snapshot;
+  snapshot.nodes.push({
+    id: `welcome-anchor:${crypto.randomUUID()}`,
+    title: anchor,
+    role: "L1",
+    status: "formal",
+    content: "来自欢迎工作区的用户确认学习锚点。",
+    x: -220,
+    y: 0,
+    sourceKind: "user-confirmed",
+    anchorLedger: [
+      {
+        source: "user-confirmed",
+        rationale: "用户在欢迎工作区确认这是可回连的已有知识。",
+        evidence: ["欢迎工作区输入"],
+        recordedAt: Date.now(),
+      },
+    ],
+  });
+  return snapshot;
+}
+
+function hasSnapshotContent(snapshot: VaultSnapshot): boolean {
+  return Boolean(
+    snapshot.nodes.length ||
+      snapshot.relations.length ||
+      snapshot.pending.length ||
+      snapshot.protocols.length ||
+      snapshot.lenses.length ||
+      snapshot.argumentRoles.length ||
+      snapshot.migrationRecords.length ||
+      snapshot.paperDrafts.length,
+  );
+}
+
+function isBundledBiologyDemo(snapshot: VaultSnapshot): boolean {
+  const demoIds = new Set(demoVaultSnapshot.nodes.map((node) => node.id));
+  return (
+    snapshot.nodes.length === demoVaultSnapshot.nodes.length &&
+    snapshot.nodes.every((node) => demoIds.has(node.id)) &&
+    snapshot.pending.length === 0 &&
+    snapshot.paperDrafts.length === 0
+  );
+}
 
 function Metric({ label, value }: { label: string; value: string | number }) {
   return (
@@ -104,7 +181,216 @@ function PendingPool({
   );
 }
 
-function BridgeSuggestions() {
+const paperStepLabels: Record<PaperBridgeDraft["chain"][number]["role"], string> = {
+  "frontier-concept": "前沿概念",
+  "bridge-mechanism": "桥梁机制",
+  "learning-anchor": "学习锚点",
+  "high-school-anchor": "学习锚点",
+  "scale-gap": "尺度鸿沟",
+};
+
+function PaperBridgePanel({
+  snapshot,
+  connection,
+  initialInput,
+  onSaveDraft,
+  onAdoptDraft,
+  onConfigure,
+}: {
+  snapshot: VaultSnapshot;
+  connection: AiConnectionSettings;
+  initialInput: string;
+  onSaveDraft: (draft: PaperBridgeDraft) => void;
+  onAdoptDraft: (draftId: string) => boolean;
+  onConfigure: () => void;
+}) {
+  const [input, setInput] = useState(initialInput);
+  const [draft, setDraft] = useState<PaperBridgeDraft | undefined>();
+  const [generating, setGenerating] = useState(false);
+  const displayedDraft = draft ?? snapshot.paperDrafts.at(-1);
+
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      setDraft(await draftPaperBridge(input, snapshot, Date.now(), connection));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "材料草拟失败");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      {!connection.endpoint && (
+        <div className="border-muted-foreground/30 flex items-center gap-2 border border-dashed px-3 py-2.5 text-xs">
+          <CircleAlert className="text-muted-foreground size-4 shrink-0" />
+          <span className="text-muted-foreground min-w-0 flex-1">未连接 AI，生成结果会明确标为本地草拟。</span>
+          <Button size="sm" variant="outline" className="h-7 shrink-0 px-2 text-xs" onClick={onConfigure}>
+            设置
+          </Button>
+        </div>
+      )}
+      <div className="space-y-2">
+        <Textarea
+          value={input}
+          onChange={(event) => setInput(event.target.value)}
+          placeholder="粘贴论文、教材段落、笔记或问题"
+          className="min-h-30 resize-y text-sm"
+        />
+        <Button className="w-full" size="sm" disabled={generating || !input.trim()} onClick={() => void generate()}>
+          {generating ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
+          {generating ? "正在草拟" : "生成学习链条"}
+        </Button>
+      </div>
+
+      {displayedDraft && (
+        <div className="overflow-hidden rounded-md border">
+          <div className="bg-muted/35 flex items-center justify-between border-b px-3 py-2">
+            <div className="min-w-0 truncate text-xs font-medium">{displayedDraft.title}</div>
+            <Badge variant={displayedDraft.provider === "remote-ai" ? "secondary" : "outline"}>
+              {displayedDraft.provider === "remote-ai" ? "AI 草拟" : "本地草拟"}
+            </Badge>
+          </div>
+          <div className="space-y-3 p-3">
+            <p className="text-muted-foreground text-xs leading-5">{displayedDraft.summary}</p>
+            {displayedDraft.diagnostic && (
+              <div className="text-muted-foreground border-muted-foreground/30 border-l pl-2 text-[11px] leading-5">
+                {displayedDraft.diagnostic}
+              </div>
+            )}
+            <div className="space-y-2">
+              {displayedDraft.chain.map((step, index) => (
+                <div key={step.id} className="flex gap-2 text-xs">
+                  <div className="flex w-4 shrink-0 flex-col items-center">
+                    <span className="bg-foreground mt-1.5 size-1.5 rounded-full" />
+                    {index < displayedDraft.chain.length - 1 && <span className="bg-border mt-1 min-h-4 w-px flex-1" />}
+                  </div>
+                  <div className="min-w-0 pb-2">
+                    <div className="flex items-center gap-1.5">
+                      <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+                        {paperStepLabels[step.role]}
+                      </Badge>
+                      <span className="truncate font-medium">{step.title}</span>
+                    </div>
+                    <div className="text-muted-foreground mt-1 leading-5">{step.explanation}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="border-muted-foreground/30 border-l pl-2 text-xs leading-5">
+              <span className="font-medium">锚点依据：</span>
+              {displayedDraft.anchorReason}
+            </div>
+          </div>
+          <div className="flex gap-2 border-t p-2">
+            <Button size="sm" variant="outline" className="flex-1" onClick={() => onSaveDraft(displayedDraft)}>
+              保存草稿
+            </Button>
+            <Button
+              size="sm"
+              className="flex-1"
+              disabled={displayedDraft.status === "adopted"}
+              onClick={() => {
+                if (onAdoptDraft(displayedDraft.id))
+                  setDraft((current) => current && { ...current, status: "adopted" });
+              }}
+            >
+              {displayedDraft.status === "adopted" ? "已采用" : "采用路径"}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiSettingsPanel({
+  value,
+  onSave,
+}: {
+  value: AiConnectionSettings;
+  onSave: (settings: AiConnectionSettings) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => setDraft(value), [value]);
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <div className="text-sm font-medium">AI 连接</div>
+        <p className="text-muted-foreground text-xs leading-5">论文桥接和节点桥梁会使用同一 OpenAI 兼容服务。</p>
+      </div>
+      <div className="space-y-2">
+        <label className="text-xs font-medium" htmlFor="kb-ai-endpoint">
+          服务地址
+        </label>
+        <Input
+          id="kb-ai-endpoint"
+          value={draft.endpoint}
+          onChange={(event) => setDraft((current) => ({ ...current, endpoint: event.target.value }))}
+          placeholder="https://api.example.com/v1"
+          autoComplete="url"
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-xs font-medium" htmlFor="kb-ai-model">
+          模型
+        </label>
+        <Input
+          id="kb-ai-model"
+          value={draft.model}
+          onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))}
+          placeholder="gpt-4.1-mini"
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-xs font-medium" htmlFor="kb-ai-key">
+          API Key（可选）
+        </label>
+        <Input
+          id="kb-ai-key"
+          type="password"
+          value={draft.apiKey}
+          onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
+          placeholder="仅保存在当前设备"
+          autoComplete="off"
+        />
+      </div>
+      <Button className="w-full" size="sm" onClick={() => onSave(draft)}>
+        <SlidersHorizontal />
+        保存 AI 设置
+      </Button>
+      <div className="border-muted-foreground/30 border-l pl-2 text-[11px] leading-5 text-muted-foreground">
+        连接信息只用于请求你指定的服务。模型结果始终先作为草稿保存，不会自动成为正式关系。
+      </div>
+    </div>
+  );
+}
+
+function BridgeSuggestions({
+  snapshot,
+  onFreeze,
+  onApplyMigration,
+}: {
+  snapshot: VaultSnapshot;
+  onFreeze: (l2Id: string) => void;
+  onApplyMigration: (preview: ReturnType<typeof buildFrozenL2MigrationPreview>) => void;
+}) {
+  const anchor = snapshot.nodes.find((node) => node.role === "L1" && node.sourceKind !== "denied");
+  const l2Nodes = snapshot.nodes.filter((node) => node.role === "L2");
+  const frozenL2 = l2Nodes.find((node) => node.status === "frozen");
+  const preview = useMemo(
+    () => (frozenL2 ? buildFrozenL2MigrationPreview(snapshot, frozenL2.id, 0) : undefined),
+    [frozenL2?.id, snapshot],
+  );
+  const highConfidenceCount =
+    preview?.paths.filter((entry) => {
+      const best = entry.candidates[0];
+      return best && best.confidence >= 0.8 && !best.conflict;
+    }).length ?? 0;
+
   return (
     <div className="space-y-3">
       <div className="overflow-hidden rounded-md border">
@@ -114,13 +400,18 @@ function BridgeSuggestions() {
         </div>
         <div className="space-y-2 p-3 text-xs">
           <div className="flex items-center justify-between gap-3">
-            <span className="font-medium">L1 细胞与遗传</span>
-            <Badge>87%</Badge>
+            <span className="font-medium">L1 {anchor?.title ?? "尚未建立锚点"}</span>
+            <Badge>{anchor?.sourceKind === "user-confirmed" ? "用户确认" : "草拟"}</Badge>
           </div>
-          <div className="text-muted-foreground leading-5">来自已确认课程笔记、近期访问和 4 条手工连接。</div>
+          <div className="text-muted-foreground leading-5">
+            {anchor?.anchorLedger?.at(-1)?.rationale ?? "AI 只能提出锚点候选，不能自动写入正式画像。"}
+          </div>
           <div className="flex flex-wrap gap-1.5">
-            <Badge variant="outline">备选：进化</Badge>
-            <Badge variant="outline">备选：稳态</Badge>
+            {(anchor?.anchorLedger?.at(-1)?.evidence ?? []).map((evidence) => (
+              <Badge key={evidence} variant="outline">
+                {evidence}
+              </Badge>
+            ))}
           </div>
         </div>
       </div>
@@ -131,37 +422,98 @@ function BridgeSuggestions() {
             <GitBranch className="size-3.5" />
             L2 替代候选
           </div>
-          <Badge variant="secondary">Top 3</Badge>
+          <Badge variant="secondary">{frozenL2 ? "迁移预览" : "准入检查"}</Badge>
         </div>
-        {["信息流与调控", "反馈调节", "选择压力"].map((title, index) => (
-          <div key={title} className="flex items-center gap-2 border-b px-3 py-2.5 last:border-b-0">
-            <span className="text-muted-foreground w-4 text-xs tabular-nums">{index + 1}</span>
-            <span className="min-w-0 flex-1 text-sm">{title}</span>
-            <span className="text-muted-foreground text-xs tabular-nums">{[92, 78, 71][index]}%</span>
-            {index === 0 && (
-              <Button size="sm" className="h-7 px-2 text-xs" onClick={() => toast.success("已加入批量迁移预览")}>
-                应用
+        {frozenL2 && preview ? (
+          <>
+            <div className="space-y-1 border-b px-3 py-2.5 text-xs">
+              <div className="font-medium">历史路径 ×{preview.paths.length}</div>
+              <div className="text-muted-foreground">仅预选 {highConfidenceCount} 条高置信、无冲突路径。</div>
+            </div>
+            {preview.paths.slice(0, 3).map((entry) => {
+              const best = entry.candidates[0];
+              return (
+                <div key={entry.path.id} className="flex items-center gap-2 border-b px-3 py-2.5 last:border-b-0">
+                  <span className="text-muted-foreground w-4 text-xs">
+                    {entry.path.family === "未设条件" ? "-" : "~"}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    {best ? snapshot.nodes.find((node) => node.id === best.l2Id)?.title : "无可靠替代"}
+                  </span>
+                  <span className="text-muted-foreground text-xs tabular-nums">
+                    {best ? `${Math.round(best.confidence * 100)}%` : "冻结"}
+                  </span>
+                </div>
+              );
+            })}
+            <div className="p-2">
+              <Button
+                size="sm"
+                className="w-full"
+                disabled={highConfidenceCount === 0}
+                onClick={() => onApplyMigration(preview)}
+              >
+                应用高置信替代
               </Button>
-            )}
-          </div>
-        ))}
+            </div>
+          </>
+        ) : (
+          l2Nodes
+            .filter((node) => node.status !== "frozen")
+            .map((node) => {
+              const report = evaluateL2Admission(snapshot, node.id);
+              return (
+                <div key={node.id} className="flex items-center gap-2 border-b px-3 py-2.5 last:border-b-0">
+                  <span className="min-w-0 flex-1 text-sm">{node.title}</span>
+                  <span className="text-muted-foreground text-xs">{report.independentPathCount} 路径</span>
+                  <Badge variant={report.qualified ? "secondary" : "outline"}>
+                    {report.qualified ? "可复核" : "待补充"}
+                  </Badge>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    className="size-7"
+                    title={`冻结 ${node.title}`}
+                    onClick={() => onFreeze(node.id)}
+                  >
+                    <ArchiveRestore className="size-3.5" />
+                  </Button>
+                </div>
+              );
+            })
+        )}
       </div>
 
       <div className="border-muted-foreground/30 flex items-center gap-2 rounded-md border border-dashed px-3 py-2.5">
-        <ArchiveRestore className="text-muted-foreground size-4" />
+        <CircleAlert className="text-muted-foreground size-4" />
         <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium">冻结路径</div>
-          <div className="text-muted-foreground text-[11px]">历史 L2 · 12 条路径等待替换预览</div>
+          <div className="text-xs font-medium">L3 生命周期</div>
+          <div className="text-muted-foreground text-[11px]">
+            {snapshot.nodes.filter((node) => node.role === "L3" && node.l3Lifecycle === "captured").length}{" "}
+            个已捕获占位符保持静默，直到再次相关。
+          </div>
         </div>
-        <Button size="sm" variant="outline" className="h-7 px-2 text-xs">
-          查看
-        </Button>
       </div>
     </div>
   );
 }
 
-function EvidencePanel() {
+function EvidencePanel({
+  snapshot,
+  onSelectLens,
+}: {
+  snapshot: VaultSnapshot;
+  onSelectLens: (lensId: string) => void;
+}) {
+  const tension = snapshot.relations.find((relation) => relation.evidence?.length);
+  const readings = tension?.evidence ?? [];
+  const protocol = snapshot.protocols[0];
+  const bundledRelations = relationBundles(snapshot);
+  const secondaryCount = bundledRelations.reduce((count, bundle) => count + bundle.secondary.length, 0);
+  const cognitiveSecondaryCount = bundledRelations.reduce(
+    (count, bundle) => count + bundle.secondary.filter((relation) => relation.layer === "cognitive").length,
+    0,
+  );
   return (
     <div className="space-y-3">
       <div className="overflow-hidden rounded-md border">
@@ -170,19 +522,26 @@ function EvidencePanel() {
             <ShieldCheck className="size-3.5" />
             证据张力线
           </div>
-          <Badge variant="outline">L4a → L4b</Badge>
+          <Badge variant="outline">{tension ? "多视角" : "暂无评价"}</Badge>
         </div>
         <div className="space-y-3 p-3">
           <div className="h-0.5 w-full bg-[linear-gradient(90deg,#3b82f6_0_45%,transparent_45%_55%,#ef4444_55%_100%)]" />
           <div className="grid grid-cols-2 gap-2 text-xs">
-            <div>
-              <div className="font-medium text-blue-400">E3 支持</div>
-              <div className="text-muted-foreground mt-1">克隆演化视角</div>
-            </div>
-            <div className="text-right">
-              <div className="font-medium text-red-400">E2 反驳</div>
-              <div className="text-muted-foreground mt-1">微环境主导视角</div>
-            </div>
+            {readings.slice(0, 2).map((reading) => (
+              <div
+                key={`${reading.perspective}:${reading.direction}`}
+                className={reading.direction === "challenges" ? "text-right" : ""}
+              >
+                <div
+                  className={
+                    reading.direction === "challenges" ? "font-medium text-red-400" : "font-medium text-blue-400"
+                  }
+                >
+                  {reading.level} {reading.direction === "challenges" ? "反驳" : "支持"}
+                </div>
+                <div className="text-muted-foreground mt-1">{reading.perspective}</div>
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -198,33 +557,71 @@ function EvidencePanel() {
             <span className="text-muted-foreground">→</span>
             <Badge variant="outline">个体</Badge>
             <Badge className="ml-auto" variant="secondary">
-              已引用
+              {protocol?.status === "confirmed" ? "已引用" : "尺度鸿沟"}
             </Badge>
           </div>
-          <div className="text-muted-foreground mt-3 text-xs leading-6">编辑效率 → 克隆扩增 → 组织表型 → 临床终点</div>
+          <div className="text-muted-foreground mt-3 text-xs leading-6">
+            {protocol?.mechanismSteps.join(" → ") ?? "需要补充中间机制"}
+          </div>
+        </div>
+      </div>
+
+      <div className="overflow-hidden rounded-md border">
+        <div className="bg-muted/35 flex items-center gap-2 border-b px-3 py-2 text-xs font-medium">
+          <Scale className="size-3.5" />
+          知识镜头
+        </div>
+        <div className="flex flex-wrap gap-1.5 p-3">
+          {snapshot.lenses.map((lens) => (
+            <Button
+              key={lens.id}
+              size="sm"
+              variant={lens.active ? "secondary" : "outline"}
+              className="h-7 px-2 text-xs"
+              onClick={() => onSelectLens(lens.id)}
+            >
+              {lens.title}
+            </Button>
+          ))}
         </div>
       </div>
 
       <div className="flex items-center gap-2 rounded-md border px-3 py-2.5">
         <CircleAlert className="size-4 text-amber-400" />
         <div className="min-w-0 flex-1 text-xs">
-          <span className="font-medium">认知层默认隐藏</span>
-          <span className="text-muted-foreground ml-2">1 条脚手架</span>
+          <span className="font-medium">关系束</span>
+          <span className="text-muted-foreground ml-2">
+            {secondaryCount} 条次级关系，含 {cognitiveSecondaryCount} 条认知脚手架
+          </span>
         </div>
       </div>
     </div>
   );
 }
 
-export default function KnowledgeBridgeWindow() {
-  const [snapshot, setSnapshot] = useState<VaultSnapshot>(demoVaultSnapshot);
-  const [vaultName, setVaultName] = useState("生物学知识库");
+export default function KnowledgeBridgeWindow({
+  initialVaultName = "跨学科知识库",
+  initialInput = "",
+  initialAnchor,
+  freshStart = false,
+}: KnowledgeBridgeLaunchOptions = {}) {
+  const resourceTab = useComponentTabResourceTab();
+  const project = resourceTab instanceof Project ? resourceTab : undefined;
+  const [snapshot, setSnapshot] = useState<VaultSnapshot>(() => createStarterSnapshot(initialAnchor));
+  const starterSnapshotRef = useRef(snapshot);
+  const [vaultName, setVaultName] = useState(initialVaultName);
+  const [persistenceMode, setPersistenceMode] = useState<"browser" | "vault">("browser");
+  const [activeTab, setActiveTab] = useState("paper");
+  const [aiConnection, setAiConnection] = useState<AiConnectionSettings>(() => loadAiConnection());
   const [indexProgress, setIndexProgress] = useState<IndexProgress>({ phase: "idle", current: 0, total: 0 });
   const snapshotRef = useRef(snapshot);
   const ledgerRef = useRef<GraphLedger | undefined>(undefined);
   const adapterRef = useRef<VaultAdapter>(new DemoVaultAdapter());
+  const ledgerWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const ledgerEpochRef = useRef(0);
   const scanControllerRef = useRef<AbortController | undefined>(undefined);
   const scanning = indexProgress.phase === "scanning";
+  const vaultBacked = persistenceMode === "vault";
   const progressValue =
     scanning && indexProgress.total === 0
       ? undefined
@@ -232,24 +629,38 @@ export default function KnowledgeBridgeWindow() {
         ? Math.round((indexProgress.current / indexProgress.total) * 100)
         : 100;
 
+  useEffect(() => {
+    if (project) synchronizeKnowledgeBridgeCanvas(project, snapshot);
+  }, [project, snapshot]);
+
   const commitSnapshot = (next: VaultSnapshot, kind: string) => {
     snapshotRef.current = next;
     setSnapshot(next);
     ledgerRef.current?.save(next, kind);
   };
 
+  const enqueueLedgerWrite = (adapter: VaultAdapter, bytes: Uint8Array): Promise<void> => {
+    const write = ledgerWriteQueueRef.current
+      .catch(() => undefined)
+      .then(() => adapter.writeBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH, bytes));
+    ledgerWriteQueueRef.current = write;
+    void write.catch((error: unknown) => toast.error(`无法保存关系账本：${String(error)}`));
+    return write;
+  };
+
   useEffect(() => {
     let disposed = false;
+    const epoch = ++ledgerEpochRef.current;
     void GraphLedger.open()
       .then((ledger) => {
-        if (disposed) return;
+        if (disposed || epoch !== ledgerEpochRef.current) return;
         ledgerRef.current = ledger;
         const saved = ledger.load();
-        if (saved.nodes.length > 0) {
+        if (hasSnapshotContent(saved) && !(freshStart && isBundledBiologyDemo(saved))) {
           snapshotRef.current = saved;
           setSnapshot(saved);
         } else {
-          ledger.save(demoVaultSnapshot, "initial-demo");
+          ledger.save(starterSnapshotRef.current, freshStart ? "welcome-start" : "initial-empty");
         }
       })
       .catch((error: unknown) => toast.error(`关系账本打开失败：${String(error)}`));
@@ -294,10 +705,30 @@ export default function KnowledgeBridgeWindow() {
 
   const switchVault = async () => {
     try {
+      await ledgerWriteQueueRef.current.catch(() => undefined);
       const adapter = await pickVault();
+      const epoch = ++ledgerEpochRef.current;
+      const bytes = await adapter.readBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH);
+      const vaultLedger = await GraphLedger.open(
+        bytes && bytes.length > 0 ? bytes : undefined,
+        (nextBytes) => enqueueLedgerWrite(adapter, nextBytes),
+        false,
+      );
+      if (epoch !== ledgerEpochRef.current) return;
+
       adapterRef.current = adapter;
+      ledgerRef.current = vaultLedger;
       setVaultName(adapter.name);
-      toast.success(`已切换到 ${adapter.name}`);
+      setPersistenceMode("vault");
+      const saved = vaultLedger.load();
+      if (hasSnapshotContent(saved)) {
+        snapshotRef.current = saved;
+        setSnapshot(saved);
+        toast.success(`已连接 ${adapter.name}，已载入其中的关系账本`);
+      } else {
+        vaultLedger.save(snapshotRef.current, "vault-create");
+        toast.success(`已连接 ${adapter.name}，关系账本将保存到 .knowledge-bridge/graph.db`);
+      }
       await startScan(adapter);
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") toast.error(String(error));
@@ -315,6 +746,61 @@ export default function KnowledgeBridgeWindow() {
     toast.success(accepted ? `已确认：${item.targetTitle}` : `已忽略：${item.targetTitle}`);
   };
 
+  const freezeBridge = (l2Id: string) => {
+    const node = snapshotRef.current.nodes.find((item) => item.id === l2Id);
+    if (!node) return;
+    commitSnapshot(freezeL2(snapshotRef.current, l2Id), "l2-freeze");
+    toast.message(`${node.title} 已冻结；历史路径保留，等待替代预览。`);
+  };
+
+  const applyMigration = (preview: ReturnType<typeof buildFrozenL2MigrationPreview>) => {
+    const next = applyHighConfidenceMigration(snapshotRef.current, preview);
+    const applied = next.migrationRecords.at(-1)?.pathMappings.length ?? 0;
+    commitSnapshot(next, "l2-migration");
+    toast.success(`已迁移 ${applied} 条高置信路径；其余路径继续冻结。`);
+  };
+
+  const selectLens = (lensId: string) => {
+    const current = snapshotRef.current;
+    commitSnapshot(
+      { ...current, lenses: current.lenses.map((lens) => ({ ...lens, active: lens.id === lensId })) },
+      "lens-select",
+    );
+  };
+
+  const savePaperDraft = (draft: PaperBridgeDraft) => {
+    const current = snapshotRef.current;
+    const paperDrafts = current.paperDrafts.some((item) => item.id === draft.id)
+      ? current.paperDrafts.map((item) => (item.id === draft.id ? draft : item))
+      : [...current.paperDrafts, draft];
+    commitSnapshot({ ...current, paperDrafts }, "paper-bridge-draft");
+    toast.success("AI 学习链已保存为草稿，尚未进入正式推理。");
+  };
+
+  const adoptPaperDraft = (draftId: string) => {
+    const current = snapshotRef.current;
+    const exists = current.paperDrafts.some((item) => item.id === draftId);
+    if (!exists) {
+      toast.message("请先保存该草稿，再采用为当前学习路径。");
+      return false;
+    }
+    commitSnapshot(
+      {
+        ...current,
+        paperDrafts: current.paperDrafts.map((item) => (item.id === draftId ? { ...item, status: "adopted" } : item)),
+      },
+      "paper-bridge-adopt",
+    );
+    toast.success("已采用为学习路径；仍需逐步复核，未创建正式逻辑关系。");
+    return true;
+  };
+
+  const saveConnection = (settings: AiConnectionSettings) => {
+    const next = saveAiConnection(settings);
+    setAiConnection(next);
+    toast.success(next.endpoint ? "AI 连接已保存。" : "AI 已切换为本地草拟模式。");
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="border-b px-3 py-3">
@@ -322,11 +808,13 @@ export default function KnowledgeBridgeWindow() {
           <Database className="size-4" />
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{vaultName} · Vault</div>
-            <div className="text-muted-foreground mt-0.5 text-[11px]">.knowledge-bridge/graph.db</div>
+            <div className="text-muted-foreground mt-0.5 text-[11px]">
+              {vaultBacked ? ".knowledge-bridge/graph.db" : "浏览器暂存（连接 Vault 后写入 graph.db）"}
+            </div>
           </div>
           <Badge variant={scanning ? "secondary" : "outline"}>
             {scanning ? <LoaderCircle className="animate-spin" /> : <ShieldCheck />}
-            {scanning ? "索引中" : "已同步"}
+            {scanning ? "索引中" : vaultBacked ? "已保存" : "暂存"}
           </Badge>
         </div>
         <Progress value={progressValue} className="mt-3 h-1" />
@@ -337,20 +825,34 @@ export default function KnowledgeBridgeWindow() {
         </div>
       </div>
 
-      <Tabs defaultValue="pending" className="min-h-0 flex-1 gap-0">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1 gap-0">
         <TabsList variant="line" className="mx-3 mt-1 w-[calc(100%-1.5rem)] justify-start">
+          <TabsTrigger value="paper">材料桥接</TabsTrigger>
           <TabsTrigger value="pending">待整理</TabsTrigger>
           <TabsTrigger value="bridge">AI 桥梁</TabsTrigger>
           <TabsTrigger value="evidence">证据与尺度</TabsTrigger>
         </TabsList>
+        <TabsContent value="paper" className="min-h-0 overflow-y-auto p-3">
+          <PaperBridgePanel
+            snapshot={snapshot}
+            connection={aiConnection}
+            initialInput={initialInput}
+            onSaveDraft={savePaperDraft}
+            onAdoptDraft={adoptPaperDraft}
+            onConfigure={() => setActiveTab("ai")}
+          />
+        </TabsContent>
         <TabsContent value="pending" className="min-h-0 overflow-y-auto p-3">
           <PendingPool items={snapshot.pending} onResolve={resolvePending} />
         </TabsContent>
         <TabsContent value="bridge" className="min-h-0 overflow-y-auto p-3">
-          <BridgeSuggestions />
+          <BridgeSuggestions snapshot={snapshot} onFreeze={freezeBridge} onApplyMigration={applyMigration} />
         </TabsContent>
         <TabsContent value="evidence" className="min-h-0 overflow-y-auto p-3">
-          <EvidencePanel />
+          <EvidencePanel snapshot={snapshot} onSelectLens={selectLens} />
+        </TabsContent>
+        <TabsContent value="ai" className="min-h-0 overflow-y-auto p-3">
+          <AiSettingsPanel value={aiConnection} onSave={saveConnection} />
         </TabsContent>
       </Tabs>
 
@@ -360,18 +862,21 @@ export default function KnowledgeBridgeWindow() {
           {scanning ? "取消扫描" : "后台索引"}
         </Button>
         <Button size="sm" variant="outline" onClick={() => void switchVault()} disabled={scanning}>
-          切换 Vault
+          {vaultBacked ? "更换 Vault" : "连接 Vault"}
+        </Button>
+        <Button size="icon" variant="ghost" title="AI 设置" onClick={() => setActiveTab("ai")}>
+          <SlidersHorizontal />
         </Button>
       </div>
     </div>
   );
 }
 
-KnowledgeBridgeWindow.open = () => {
+KnowledgeBridgeWindow.open = (options: KnowledgeBridgeLaunchOptions = {}) => {
   createSubWindow("KnowledgeBridgeWindow", {
     title: "Knowledge Bridge",
     contextTarget: "activeResourceTab",
-    children: <KnowledgeBridgeWindow />,
+    children: <KnowledgeBridgeWindow {...options} />,
     rect: new Rectangle(new Vector(1020, 52), new Vector(390, 790)),
   });
 };

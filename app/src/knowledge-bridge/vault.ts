@@ -1,10 +1,15 @@
 import type { VaultFile } from "./model";
 
+export const KNOWLEDGE_BRIDGE_LEDGER_PATH = ".knowledge-bridge/graph.db";
+
 export interface VaultAdapter {
   readonly name: string;
+  readonly persistence: "browser" | "vault";
   listMarkdown(signal?: AbortSignal): AsyncGenerator<VaultFile>;
   read(path: string): Promise<string>;
   write(path: string, content: string): Promise<void>;
+  readBinary(path: string): Promise<Uint8Array | undefined>;
+  writeBinary(path: string, bytes: Uint8Array): Promise<void>;
 }
 
 type DirectoryHandleWithEntries = FileSystemDirectoryHandle & {
@@ -31,8 +36,89 @@ async function resolveFile(root: FileSystemDirectoryHandle, path: string, create
   return directory.getFileHandle(parts.at(-1)!, { create });
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_OS_PLUGIN_INTERNALS__" in window;
+}
+
+function vaultPathParts(path: string): string[] {
+  return path.split(/[\\/]/).filter(Boolean);
+}
+
+export class TauriVaultAdapter implements VaultAdapter {
+  constructor(private readonly root: string) {}
+  readonly persistence = "vault" as const;
+  get name(): string {
+    return vaultPathParts(this.root).at(-1) ?? this.root;
+  }
+
+  private async resolve(path: string): Promise<string> {
+    const { join } = await import("@tauri-apps/api/path");
+    return join(this.root, ...vaultPathParts(path));
+  }
+
+  private async ensureParent(path: string): Promise<void> {
+    const parts = vaultPathParts(path);
+    if (parts.length < 2) return;
+    const { join } = await import("@tauri-apps/api/path");
+    const { mkdir } = await import("@tauri-apps/plugin-fs");
+    await mkdir(await join(this.root, ...parts.slice(0, -1)), { recursive: true });
+  }
+
+  private async *walk(directory: string, prefix: string, signal?: AbortSignal): AsyncGenerator<VaultFile> {
+    const [{ readDir, readTextFile, stat }, { join }] = await Promise.all([
+      import("@tauri-apps/plugin-fs"),
+      import("@tauri-apps/api/path"),
+    ]);
+    for (const entry of await readDir(directory)) {
+      if (signal?.aborted) return;
+      if (entry.name === ".knowledge-bridge" || entry.name === ".obsidian") continue;
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = await join(directory, entry.name);
+      if (entry.isDirectory) {
+        yield* this.walk(absolutePath, path, signal);
+      } else if (entry.isFile && entry.name.toLowerCase().endsWith(".md")) {
+        const [content, fileInfo] = await Promise.all([readTextFile(absolutePath), stat(absolutePath)]);
+        yield {
+          path,
+          content,
+          size: fileInfo.size,
+          modifiedAt: fileInfo.mtime?.getTime() ?? Date.now(),
+        };
+      }
+    }
+  }
+
+  async *listMarkdown(signal?: AbortSignal): AsyncGenerator<VaultFile> {
+    yield* this.walk(this.root, "", signal);
+  }
+
+  async read(path: string): Promise<string> {
+    const { readTextFile } = await import("@tauri-apps/plugin-fs");
+    return readTextFile(await this.resolve(path));
+  }
+
+  async write(path: string, content: string): Promise<void> {
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    await this.ensureParent(path);
+    await writeTextFile(await this.resolve(path), content);
+  }
+
+  async readBinary(path: string): Promise<Uint8Array | undefined> {
+    const { exists, readFile } = await import("@tauri-apps/plugin-fs");
+    const absolutePath = await this.resolve(path);
+    return (await exists(absolutePath)) ? readFile(absolutePath) : undefined;
+  }
+
+  async writeBinary(path: string, bytes: Uint8Array): Promise<void> {
+    const { writeFile } = await import("@tauri-apps/plugin-fs");
+    await this.ensureParent(path);
+    await writeFile(await this.resolve(path), bytes);
+  }
+}
+
 export class BrowserVaultAdapter implements VaultAdapter {
   constructor(private readonly root: FileSystemDirectoryHandle) {}
+  readonly persistence = "vault" as const;
   get name(): string {
     return this.root.name;
   }
@@ -48,15 +134,33 @@ export class BrowserVaultAdapter implements VaultAdapter {
     await writable.write(content);
     await writable.close();
   }
+  async readBinary(path: string): Promise<Uint8Array | undefined> {
+    try {
+      const file = await (await resolveFile(this.root, path)).getFile();
+      return new Uint8Array(await file.arrayBuffer());
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "NotFoundError") return undefined;
+      throw error;
+    }
+  }
+  async writeBinary(path: string, bytes: Uint8Array): Promise<void> {
+    const writable = await (await resolveFile(this.root, path, true)).createWritable();
+    const buffer = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(buffer).set(bytes);
+    await writable.write(buffer);
+    await writable.close();
+  }
 }
 
 export class DemoVaultAdapter implements VaultAdapter {
-  readonly name = "生物学知识库";
+  readonly name = "浏览器暂存";
+  readonly persistence = "browser" as const;
   private readonly files = new Map<string, string>([
     ["Notes/DNA 与基因.md", "---\nkb-id: dna\n---\n\n# DNA 与基因\n\n[[信息传递机制]]"],
     ["Notes/信息传递机制.md", "---\nkb-id: expression\n---\n\n# 信息传递机制\n\n转录、翻译与调控。"],
     ["Sources/肿瘤细胞状态研究.md", "---\nkb-id: paper\n---\n\n# 肿瘤细胞状态研究\n\n[[空间转录组]]"],
   ]);
+  private readonly binaryFiles = new Map<string, Uint8Array>();
   async *listMarkdown(signal?: AbortSignal): AsyncGenerator<VaultFile> {
     for (const [path, content] of this.files) {
       if (signal?.aborted) return;
@@ -70,9 +174,22 @@ export class DemoVaultAdapter implements VaultAdapter {
   async write(path: string, content: string): Promise<void> {
     this.files.set(path, content);
   }
+  async readBinary(path: string): Promise<Uint8Array | undefined> {
+    const bytes = this.binaryFiles.get(path);
+    return bytes?.slice();
+  }
+  async writeBinary(path: string, bytes: Uint8Array): Promise<void> {
+    this.binaryFiles.set(path, bytes.slice());
+  }
 }
 
 export async function pickVault(): Promise<VaultAdapter> {
+  if (isTauriRuntime()) {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({ title: "选择 Knowledge Bridge Vault", directory: true, multiple: false });
+    if (typeof selected !== "string") throw new DOMException("已取消选择 Vault", "AbortError");
+    return new TauriVaultAdapter(selected);
+  }
   const picker = (window as Window & { showDirectoryPicker?: (options?: { mode: "readwrite" }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
   if (!picker) throw new Error("当前浏览器不支持本地文件夹访问，请使用 Chromium 浏览器。");
   return new BrowserVaultAdapter(await picker({ mode: "readwrite" }));

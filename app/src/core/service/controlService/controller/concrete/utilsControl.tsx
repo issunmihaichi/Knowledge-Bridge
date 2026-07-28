@@ -252,7 +252,7 @@ export class ControllerUtils {
       clickedNode.details = value;
       // 向孪生兄弟同步 details
       this.project.syncAssociationManager.syncFrom(clickedNode, "details");
-    });
+    }, clickedNode.uuid);
   }
 
   async addTextNodeByLocation(location: Vector, selectCurrent: boolean = false, autoEdit: boolean = false) {

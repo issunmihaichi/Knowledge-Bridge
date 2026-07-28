@@ -37,6 +37,19 @@ const SubContent = MenubarSubContent;
 const SubTrigger = MenubarSubTrigger;
 const Trigger = MenubarTrigger;
 
+const focusedMenuItems: Record<string, ReadonlySet<string>> = {
+  file: new Set(["newDraft", "openFile", "recentFilesSub", "saveFile", "saveAs", "importSub", "exportSub"]),
+  view: new Set(["resetViewAll", "resetView", "resetCameraScale", "moveViewToOrigin"]),
+  actions: new Set(["toggleCommandPalette", "searchText", "undo", "redo", "updateReferences", "closeAllSubWindows"]),
+  settings: new Set(["clickAppMenuSettingsButton", "openAppearanceSettings", "openConfigFolder"]),
+};
+
+function focusedMenu(top: GlobalMenuConfigItem): GlobalMenuConfigItem | undefined {
+  const allowed = focusedMenuItems[top.id];
+  if (top.type !== "topMenu" || !allowed) return undefined;
+  return { ...top, children: top.children?.filter((item) => item.type === "separator" || allowed.has(item.id)) };
+}
+
 function resolveIcon(itemId: string, iconName?: string): ReactNode {
   if (iconName) {
     const Comp = (LucideIcons as unknown as Record<string, ComponentType<LucideProps>>)[iconName];
@@ -166,5 +179,12 @@ export default function GlobalMenuContent() {
     );
   };
 
-  return <Menubar className="shrink-0">{config.map(renderTopMenu)}</Menubar>;
+  return (
+    <Menubar className="shrink-0">
+      {config
+        .map(focusedMenu)
+        .filter(Boolean)
+        .map((item) => renderTopMenu(item!))}
+    </Menubar>
+  );
 }

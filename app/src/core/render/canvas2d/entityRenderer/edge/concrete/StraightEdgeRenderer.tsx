@@ -103,6 +103,11 @@ export class StraightEdgeRenderer extends EdgeRendererClass {
   }
 
   public renderNormalState(edge: LineEdge): void {
+    if (edge.lineType === "knowledge-bridge-secondary") {
+      this.renderKnowledgeBridgeSecondary(edge);
+      return;
+    }
+
     // 直线绘制
     const edgeColor = edge.color.equals(Color.Transparent)
       ? this.project.stageStyleManager.currentStyle.StageObjectBorder
@@ -146,6 +151,42 @@ export class StraightEdgeRenderer extends EdgeRendererClass {
     const edgeColor = edge.color.equals(Color.Transparent)
       ? this.project.stageStyleManager.currentStyle.StageObjectBorder
       : edge.color;
+    if (edge.lineType === "knowledge-bridge-secondary") {
+      const body = edge.bodyLine;
+      const direction = body.end.subtract(body.start);
+      const length = direction.magnitude();
+      if (length === 0) return <></>;
+
+      const expanded = edge.source.isMouseHover || edge.target.isMouseHover || edge.isSelected;
+      const lineBody = expanded
+        ? SvgUtils.dashedLine(body.start, body.end, edgeColor, 1.5, "8,8")
+        : (() => {
+            const capLength = Math.min(length * 0.28, 22);
+            const offset = direction.normalize().multiply(capLength);
+            return (
+              <>
+                {SvgUtils.dashedLine(body.start, body.start.add(offset), edgeColor, 1.5, "6,6")}
+                {SvgUtils.dashedLine(body.end.subtract(offset), body.end, edgeColor, 1.5, "6,6")}
+              </>
+            );
+          })();
+      const textNode =
+        expanded && edge.text.trim() !== ""
+          ? SvgUtils.textFromCenterWithStroke(
+              edge.text,
+              body.midPoint(),
+              edge.textFontSize,
+              edgeColor,
+              this.project.stageStyleManager.currentStyle.Background,
+            )
+          : null;
+      return (
+        <>
+          {lineBody}
+          {textNode}
+        </>
+      );
+    }
     const lineBody = SvgUtils.line(edge.bodyLine.start, edge.bodyLine.end, edgeColor, 2);
 
     let textNode: React.ReactNode = <></>;
@@ -219,7 +260,56 @@ export class StraightEdgeRenderer extends EdgeRendererClass {
   }
 
   private shouldRenderTargetArrow(edge: LineEdge): boolean {
-    return !(Settings.hideArrowWhenPointingToConnectPoint && edge.target instanceof ConnectPoint);
+    return (
+      edge.arrowType !== "none" &&
+      !(Settings.hideArrowWhenPointingToConnectPoint && edge.target instanceof ConnectPoint)
+    );
+  }
+
+  /**
+   * Secondary relations remain discoverable as short white dashed marks at
+   * both node boundaries. Hovering either endpoint expands the complete line.
+   */
+  private renderKnowledgeBridgeSecondary(edge: LineEdge): void {
+    const body = edge.bodyLine;
+    const start = this.project.renderer.transformWorld2View(body.start);
+    const end = this.project.renderer.transformWorld2View(body.end);
+    const direction = end.subtract(start);
+    const length = direction.magnitude();
+    if (length === 0) return;
+
+    const width = 1.5 * this.project.camera.currentScale;
+    const expanded = edge.source.isMouseHover || edge.target.isMouseHover || edge.isSelected;
+    if (expanded) {
+      this.project.curveRenderer.renderDashedLine(start, end, edge.color, width, 8 * this.project.camera.currentScale);
+      if (edge.text.trim() !== "") {
+        this.project.textRenderer.renderMultiLineTextFromCenterWithStroke(
+          edge.text,
+          start.add(end).divide(2),
+          edge.textFontSize * this.project.camera.currentScale,
+          edge.color,
+          this.project.stageStyleManager.currentStyle.Background,
+        );
+      }
+      return;
+    }
+
+    const capLength = Math.min(length * 0.28, 22 * this.project.camera.currentScale);
+    const offset = direction.normalize().multiply(capLength);
+    this.project.curveRenderer.renderDashedLine(
+      start,
+      start.add(offset),
+      edge.color,
+      width,
+      6 * this.project.camera.currentScale,
+    );
+    this.project.curveRenderer.renderDashedLine(
+      end.subtract(offset),
+      end,
+      edge.color,
+      width,
+      6 * this.project.camera.currentScale,
+    );
   }
 
   public renderShiftingState(edge: LineEdge): void {

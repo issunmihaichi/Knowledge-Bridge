@@ -34,8 +34,7 @@ import { handleDeepLink, isProjectGraphDeepLink } from "./core/service/dataFileS
 import { onNewDraft, onOpenFile } from "./core/service/GlobalMenu";
 import { TabWorkspace } from "./core/TabWorkspace";
 import WelcomeWindow from "./sub/WelcomeWindow";
-import { seedKnowledgeBridgeDemo } from "./knowledge-bridge/demo";
-import KnowledgeBridgeWindow from "./sub/KnowledgeBridgeWindow";
+import KnowledgeBridgeWelcomeWindow from "./sub/KnowledgeBridgeWelcomeWindow";
 import "./css/index.css";
 import Fallback from "./Fallback";
 
@@ -231,11 +230,10 @@ async function loadStartFile() {
 /** 无外部文件时创建空草稿并弹出欢迎窗（类 Blender splash） */
 async function ensureStartupDraftAndWelcome() {
   if (store.get(tabsAtom).length > 0) return;
-  const project = await onNewDraft();
+  await onNewDraft();
   if (isWeb) {
     TabWorkspace.synchronizeGroups();
-    seedKnowledgeBridgeDemo(project);
-    KnowledgeBridgeWindow.open();
+    KnowledgeBridgeWelcomeWindow.open();
     return;
   }
   WelcomeWindow.open();

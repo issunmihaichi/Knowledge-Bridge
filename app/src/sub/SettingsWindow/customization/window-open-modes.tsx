@@ -44,6 +44,7 @@ const WINDOW_LABELS: Record<SubWindowId, string> = {
   GenerateNodeGraph: "生成节点网",
   GenerateNodeMermaid: "Mermaid 生成结构",
   KeyboardRecentFilesWindow: "键盘最近文件",
+  KnowledgeBridgeWelcomeWindow: "Knowledge Bridge 欢迎工作区",
   KnowledgeBridgeWindow: "Knowledge Bridge",
   LatexEditWindow: "LaTeX 编辑",
   NewExportPngWindow: "新导出 PNG",

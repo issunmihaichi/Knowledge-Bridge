@@ -26,7 +26,7 @@ export class SymmetryCurveEdgeRenderer extends EdgeRendererClass {
   }
 
   private shouldRenderTargetArrow(edge: LineEdge): boolean {
-    return !(Settings.hideArrowWhenPointingToConnectPoint && edge.target instanceof ConnectPoint);
+    return edge.arrowType !== "none" && !(Settings.hideArrowWhenPointingToConnectPoint && edge.target instanceof ConnectPoint);
   }
 
   getCuttingEffects(edge: LineEdge): Effect[] {

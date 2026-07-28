@@ -63,7 +63,11 @@ export class EdgeRenderer {
     const source = edge.source;
     const target = edge.target;
 
-    if (source.uuid === target.uuid) {
+    if (edge.uuid.startsWith("kb:relation:")) {
+      // Knowledge Bridge relations keep their semantic colors and line styles
+      // independent from the optional vertical routing renderer.
+      this.project.straightEdgeRenderer.renderNormalState(edge);
+    } else if (source.uuid === target.uuid) {
       this.currentRenderer.renderCycleState(edge);
     } else {
       if (edge.shiftingIndex !== 0) {
@@ -158,6 +162,10 @@ export class EdgeRenderer {
         associationList: [this.getMinNonCollapseParentSection(edge.source), edge.target],
         text: edge.text,
         uuid: edge.uuid,
+        color: edge.color,
+        lineType: edge.lineType,
+        arrowType: edge.arrowType,
+        targetRectangleRate: edge.targetRectangleRate,
       });
     }
     if (edge.target.isHiddenBySectionCollapse) {
@@ -165,6 +173,10 @@ export class EdgeRenderer {
         associationList: [edge.source, this.getMinNonCollapseParentSection(edge.target)],
         text: edge.text,
         uuid: edge.uuid,
+        color: edge.color,
+        lineType: edge.lineType,
+        arrowType: edge.arrowType,
+        sourceRectangleRate: edge.sourceRectangleRate,
       });
     }
     return edge;
@@ -173,6 +185,11 @@ export class EdgeRenderer {
   getEdgeSvg(edge: LineEdge): React.ReactNode {
     if (edge.source.isHiddenBySectionCollapse && edge.target.isHiddenBySectionCollapse) {
       return <></>;
+    }
+
+    edge = this.getEdgeView(edge);
+    if (edge.uuid.startsWith("kb:relation:")) {
+      return this.project.straightEdgeRenderer.getNormalStageSvg(edge);
     }
 
     if (edge.source.uuid === edge.target.uuid) {

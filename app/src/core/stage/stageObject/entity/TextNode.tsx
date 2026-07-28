@@ -60,6 +60,10 @@ export class TextNode extends ConnectableEntity implements ResizeAble {
   @serializable
   public fontWeight: string = "";
 
+  /** Whether a single click should open this node's long-form note. */
+  @serializable
+  public openDetailsOnClick: boolean = false;
+
   /**
    * 节点是否被选中
    */
@@ -116,6 +120,7 @@ export class TextNode extends ConnectableEntity implements ResizeAble {
       fontScaleLevel = 0,
       fontFamily = "",
       fontWeight = "",
+      openDetailsOnClick = false,
     }: {
       uuid?: string;
       text?: string;
@@ -126,6 +131,7 @@ export class TextNode extends ConnectableEntity implements ResizeAble {
       fontScaleLevel?: number;
       fontFamily?: string;
       fontWeight?: string;
+      openDetailsOnClick?: boolean;
     },
     public unknown = false,
   ) {
@@ -139,6 +145,7 @@ export class TextNode extends ConnectableEntity implements ResizeAble {
     this.fontScaleLevel = fontScaleLevel;
     this.fontFamily = fontFamily;
     this.fontWeight = fontWeight;
+    this.openDetailsOnClick = openDetailsOnClick;
     // 初始化字体大小缓存
     this.updateFontSizeCache();
     // if (this.text.length < TextNode.enableResizeCharCount) {

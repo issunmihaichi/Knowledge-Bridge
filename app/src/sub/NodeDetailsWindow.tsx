@@ -30,6 +30,7 @@ export default function NodeDetailsWindow({
   onChange?: (value: Value) => void;
 }) {
   useEffect(() => {
+    detailTabIds.add(tabId);
     return () => {
       detailTabIds.delete(tabId);
     };
@@ -60,15 +61,21 @@ export default function NodeDetailsWindow({
   );
 }
 
-NodeDetailsWindow.open = (value?: Value, onChange?: (value: Value) => void) => {
+NodeDetailsWindow.open = (value?: Value, onChange?: (value: Value) => void, nodeId: string = crypto.randomUUID()) => {
   const existing = store.get(tabsAtom).find((tab) => !tab.closing && detailTabIds.has(tab.id));
   if (existing) {
-    void TabWorkspace.close(existing.id);
+    TabWorkspace.update(existing.id, {
+      children: (componentTab) => (
+        <NodeDetailsWindow key={nodeId} tabId={componentTab.id} value={value} onChange={onChange} />
+      ),
+    });
+    TabWorkspace.focus(existing.id);
     return;
   }
 
   const tab = createSubWindow("NodeDetailsWindow", {
-    children: (componentTab) => <NodeDetailsWindow tabId={componentTab.id} value={value} onChange={onChange} />,
+    title: "知识详情",
+    children: (componentTab) => <NodeDetailsWindow key={nodeId} tabId={componentTab.id} value={value} onChange={onChange} />,
     rect: new Rectangle(
       new Vector(innerWidth * 0.75, innerHeight * 0.1),
       new Vector(innerWidth * 0.25, innerHeight * 0.9),

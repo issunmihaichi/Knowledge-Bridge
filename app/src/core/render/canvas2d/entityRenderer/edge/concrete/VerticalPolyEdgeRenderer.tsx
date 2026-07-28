@@ -402,7 +402,7 @@ export class VerticalPolyEdgeRenderer extends EdgeRendererClass {
     }
   }
   private shouldRenderTargetArrow(edge: LineEdge): boolean {
-    return !(Settings.hideArrowWhenPointingToConnectPoint && edge.target instanceof ConnectPoint);
+    return edge.arrowType !== "none" && !(Settings.hideArrowWhenPointingToConnectPoint && edge.target instanceof ConnectPoint);
   }
   private renderArrowHead(edge: LineEdge, direction: Vector, endPoint = edge.bodyLine.end.clone()) {
     const size = 15;
