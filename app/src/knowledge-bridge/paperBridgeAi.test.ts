@@ -76,6 +76,53 @@ describe("source bridge drafting", () => {
     );
   });
 
+  it("rejects a known node id when the model assigns it the wrong learning role", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  title: "Role validation",
+                  summary: "Draft only",
+                  anchorReason: "The anchor is audited",
+                  confidence: 0.7,
+                  chain: [
+                    { role: "frontier-concept", title: "New topic", explanation: "New" },
+                    {
+                      role: "bridge-mechanism",
+                      nodeId: "l1-cell",
+                      title: "Incorrectly reused anchor",
+                      explanation: "Wrong role",
+                    },
+                    {
+                      role: "learning-anchor",
+                      nodeId: "l1-cell",
+                      title: "Cell",
+                      explanation: "Audited",
+                    },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      ),
+    );
+    globalThis.fetch = fetchMock;
+
+    const draft = await draftPaperBridge("Role test", structuredClone(demoVaultSnapshot), 100, {
+      endpoint: "https://example.test/v1",
+      model: "test-model",
+      apiKey: "",
+    });
+
+    expect(draft.provider).toBe("remote-ai");
+    expect(draft.chain.find((step) => step.role === "bridge-mechanism")?.nodeId).toBeUndefined();
+    expect(draft.chain.find((step) => step.role === "learning-anchor")?.nodeId).toBe("l1-cell");
+  });
+
   it("keeps valid MCP calls as approval requests instead of claiming they ran", async () => {
     globalThis.fetch = vi.fn().mockResolvedValue(
       new Response(

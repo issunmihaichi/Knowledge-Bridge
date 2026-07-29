@@ -16,7 +16,10 @@ function defaults(): AiConnectionSettings {
 
 export function normalizeAiConnection(value: Partial<AiConnectionSettings>): AiConnectionSettings {
   return {
-    endpoint: (value.endpoint ?? "").trim().replace(/\/?chat\/completions\/?$/, "").replace(/\/$/, ""),
+    endpoint: (value.endpoint ?? "")
+      .trim()
+      .replace(/\/?chat\/completions\/?$/, "")
+      .replace(/\/$/, ""),
     model: (value.model ?? "").trim() || "gpt-4.1-mini",
     apiKey: (value.apiKey ?? "").trim(),
   };

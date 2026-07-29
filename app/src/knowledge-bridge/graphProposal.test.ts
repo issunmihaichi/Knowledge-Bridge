@@ -78,4 +78,36 @@ describe("Knowledge Bridge graph proposals", () => {
     expect(applied.nodes.filter((node) => node.role === "L1")).toHaveLength(1);
     expect(applied.relations.some((relation) => relation.source === "known-anchor")).toBe(true);
   });
+
+  it("does not reuse a frozen or role-incompatible node from an agent draft", () => {
+    const snapshot = structuredClone(emptyVaultSnapshot);
+    snapshot.nodes.push({
+      id: "wrong-role",
+      title: "Anchor, not bridge",
+      role: "L1",
+      status: "formal",
+      sourceKind: "user-confirmed",
+      content: "Prior knowledge",
+      x: -200,
+      y: 0,
+    });
+    const malformed = {
+      ...draft,
+      chain: draft.chain.map((step) =>
+        step.role === "bridge-mechanism" ? { ...step, nodeId: "wrong-role", state: "existing" as const } : step,
+      ),
+    };
+    const proposal = createGraphChangeProposal(malformed, snapshot, 200, "proposal-invalid-role");
+    const bridgeNode = proposal.operations.find(
+      (operation) => operation.type === "create-node" && operation.node.role === "L2",
+    );
+    expect(bridgeNode).toEqual(expect.objectContaining({ type: "create-node" }));
+    expect(
+      proposal.operations.some(
+        (operation) =>
+          operation.type === "create-relation" &&
+          (operation.relation.source === "wrong-role" || operation.relation.target === "wrong-role"),
+      ),
+    ).toBe(false);
+  });
 });

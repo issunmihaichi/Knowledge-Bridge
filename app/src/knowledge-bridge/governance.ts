@@ -5,7 +5,6 @@ import type {
   KnowledgeRelation,
   MigrationCandidate,
   MigrationRecord,
-  RelationStatus,
   VaultSnapshot,
 } from "./model";
 
@@ -18,6 +17,13 @@ function isInformative(value?: string): boolean {
 
 function getNode(snapshot: VaultSnapshot, id: string): KnowledgeNode | undefined {
   return snapshot.nodes.find((node) => node.id === id);
+}
+
+function hasReasoningSource(snapshot: VaultSnapshot, relation: KnowledgeRelation): boolean {
+  return [relation.source, relation.target].every((id) => {
+    const node = getNode(snapshot, id);
+    return Boolean(node && node.status !== "missing-source");
+  });
 }
 
 function isActiveLogical(relation: KnowledgeRelation): boolean {
@@ -42,18 +48,7 @@ export function evaluateL2Admission(snapshot: VaultSnapshot, l2Id: string): L2Ad
     return { l2Id, qualified: false, independentPathCount: 0, reasons: ["目标不是 L2 节点"], similarMechanisms: [] };
   }
 
-  const inbound = snapshot.relations.filter(
-    (relation) =>
-      isActiveLogical(relation) && relation.target === l2Id && getNode(snapshot, relation.source)?.role === "L1",
-  );
-  const outbound = snapshot.relations.filter(
-    (relation) =>
-      isActiveLogical(relation) && relation.source === l2Id && getNode(snapshot, relation.target)?.role === "L3",
-  );
-  const independentPaths = new Set<string>();
-  for (const left of inbound) {
-    for (const right of outbound) independentPaths.add(`${left.source}:${right.target}`);
-  }
+  const independentPaths = new Set(collectFrozenPaths(snapshot, l2Id).map((path) => `${path.l1Id}:${path.l3Id}`));
 
   const titleTerms = new Set(node.title.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []);
   const similarMechanisms = snapshot.nodes
@@ -113,16 +108,85 @@ export function adoptAiDraft(snapshot: VaultSnapshot, relationId: string, now = 
   };
 }
 
-export function normalizeCrossScaleRelation(relation: KnowledgeRelation, snapshot: VaultSnapshot): KnowledgeRelation {
-  if (relation.reasoningKind !== "cross-scale") return relation;
+function hasCompleteScaleProtocol(relation: KnowledgeRelation, snapshot: VaultSnapshot): boolean {
   const protocol = relation.scaleProtocolId
     ? snapshot.protocols.find((item) => item.id === relation.scaleProtocolId)
     : undefined;
-  if (protocol?.status === "confirmed" && protocol.mechanismSteps.length > 0) return relation;
+  return protocol?.status === "confirmed" && protocol.mechanismSteps.length > 0;
+}
+
+export function normalizeCrossScaleRelation(relation: KnowledgeRelation, snapshot: VaultSnapshot): KnowledgeRelation {
+  if (relation.reasoningKind !== "cross-scale") return relation;
+  if (hasCompleteScaleProtocol(relation, snapshot)) {
+    return relation.crossScaleStrength ? relation : { ...relation, crossScaleStrength: "strong" };
+  }
   return {
     ...relation,
     status: relation.status === "formal" ? "pending" : relation.status,
+    crossScaleStrength: "observation",
   };
+}
+
+/** Enforce scale governance for every backend mutation, regardless of origin. */
+export function enforceCrossScaleGovernance(snapshot: VaultSnapshot): VaultSnapshot {
+  let changed = false;
+  const missingProtocolIds = new Set<string>();
+  const relations = snapshot.relations.map((relation) => {
+    const normalized = normalizeCrossScaleRelation(relation, snapshot);
+    if (normalized !== relation) changed = true;
+    if (
+      normalized.reasoningKind === "cross-scale" &&
+      normalized.status !== "severed" &&
+      normalized.status !== "historical" &&
+      normalized.status !== "frozen" &&
+      !hasCompleteScaleProtocol(normalized, snapshot)
+    ) {
+      missingProtocolIds.add(normalized.id);
+    }
+    return normalized;
+  });
+  let pending = snapshot.pending.filter((item) => {
+    if (item.kind !== "scale-gap") return true;
+    const keep = missingProtocolIds.has(item.id.replace(/^scale-gap:/, ""));
+    if (!keep) changed = true;
+    return keep;
+  });
+  for (const relation of relations) {
+    if (!missingProtocolIds.has(relation.id)) continue;
+    const id = `scale-gap:${relation.id}`;
+    if (pending.some((item) => item.id === id)) continue;
+    pending = [
+      ...pending,
+      {
+        id,
+        filePath: relation.context ?? ".knowledge-bridge/scale-gaps",
+        sourceId: relation.source,
+        targetTitle: `尺度鸿沟：${relation.label}`,
+        kind: "scale-gap",
+        raw: "缺少已确认且含中间机制步骤的尺度换算协议；当前关系仅作为观察相关保存。",
+      },
+    ];
+    changed = true;
+  }
+  return changed ? { ...snapshot, relations, pending } : snapshot;
+}
+
+/** A frozen L2 is a historical summary and cannot acquire visible connections. */
+export function enforceFrozenL2Governance(snapshot: VaultSnapshot): VaultSnapshot {
+  const frozenIds = new Set(
+    snapshot.nodes.filter((node) => node.role === "L2" && node.status === "frozen").map((node) => node.id),
+  );
+  if (frozenIds.size === 0) return snapshot;
+  let changed = false;
+  const relations = snapshot.relations.map((relation) => {
+    if (!frozenIds.has(relation.source) && !frozenIds.has(relation.target)) return relation;
+    if (relation.status === "severed" || relation.status === "historical" || relation.status === "frozen") {
+      return relation;
+    }
+    changed = true;
+    return { ...relation, status: "frozen" as const };
+  });
+  return changed ? { ...snapshot, relations } : snapshot;
 }
 
 export interface RelationBundle {
@@ -131,14 +195,16 @@ export interface RelationBundle {
   relations: KnowledgeRelation[];
   logical: KnowledgeRelation[];
   cognitive: KnowledgeRelation[];
+  /** Total cognitive relations on this node pair, including the visible one for a cognitive-only pair. */
   cognitiveCount: number;
+  /** Cognitive relations intentionally omitted from the default canvas projection. */
+  hiddenCognitiveCount: number;
   primary?: KnowledgeRelation;
-  secondary: KnowledgeRelation[];
   label?: string;
 }
 
 function isRenderableRelation(relation: KnowledgeRelation): boolean {
-  return relation.status !== "severed" && relation.status !== "historical";
+  return relation.status !== "severed" && relation.status !== "historical" && relation.status !== "frozen";
 }
 
 /**
@@ -158,15 +224,21 @@ export function relationDisplayWeight(relation: KnowledgeRelation): number {
 function buildRelationBundle(source: string, target: string, relations: KnowledgeRelation[]): RelationBundle {
   const logical = relations.filter((relation) => relation.layer === "logical");
   const cognitive = relations.filter((relation) => relation.layer === "cognitive");
-  const ordered = [...relations].sort((left, right) => {
+  const byDisplayWeight = (left: KnowledgeRelation, right: KnowledgeRelation) => {
     const difference = relationDisplayWeight(right) - relationDisplayWeight(left);
     if (difference !== 0) return difference;
     return left.id.localeCompare(right.id);
-  });
-  const primary = ordered[0];
-  const secondary = ordered.slice(1);
+  };
+  const orderedLogical = [...logical].sort(byDisplayWeight);
+  const orderedCognitive = [...cognitive].sort(byDisplayWeight);
+  // Logical meaning always wins the default projection. Cognitive scaffolding
+  // remains inspectable in the bundle but cannot obscure or replace it.
+  const primary = orderedLogical[0] ?? orderedCognitive[0];
   const cognitiveCount = cognitive.length;
-  if (logical.length === 0) return { source, target, relations, logical, cognitive, cognitiveCount, primary, secondary };
+  const hiddenCognitiveCount = logical.length > 0 ? cognitive.length : Math.max(0, cognitive.length - 1);
+  if (logical.length <= 1) {
+    return { source, target, relations, logical, cognitive, cognitiveCount, hiddenCognitiveCount, primary };
+  }
   const outcome = logical.some((relation) => relation.logicalOutcome === "conflicting")
     ? "冲突"
     : logical.some((relation) => relation.logicalOutcome === "conditional")
@@ -179,15 +251,16 @@ function buildRelationBundle(source: string, target: string, relations: Knowledg
     logical,
     cognitive,
     cognitiveCount,
+    hiddenCognitiveCount,
     primary,
-    secondary,
     label: `${outcome} ×${logical.length}`,
   };
 }
 
 /**
- * One relation remains visually decisive, but every other relation stays in
- * the bundle as an expandable secondary edge. No layer is silently discarded.
+ * A node pair produces exactly one default canvas edge. All relations remain
+ * in the bundle for details and auditing, but cognitive scaffolding is hidden
+ * whenever logical meaning exists on the same pair.
  */
 export function bundleRelations(snapshot: VaultSnapshot, source: string, target: string): RelationBundle {
   const relations = snapshot.relations.filter(
@@ -207,48 +280,63 @@ export function relationBundles(snapshot: VaultSnapshot): RelationBundle[] {
     pairs.set(key, pair);
   }
   return [...pairs.values()].map((relations) => {
-    const ordered = [...relations].sort((left, right) => {
-      const difference = relationDisplayWeight(right) - relationDisplayWeight(left);
-      if (difference !== 0) return difference;
-      return left.id.localeCompare(right.id);
-    });
-    const primary = ordered[0];
-    return buildRelationBundle(primary?.source ?? "", primary?.target ?? "", relations);
+    const representative = relations[0];
+    return buildRelationBundle(representative?.source ?? "", representative?.target ?? "", relations);
   });
 }
 
 export function collectFrozenPaths(snapshot: VaultSnapshot, l2Id: string): FrozenPath[] {
   const inbound = snapshot.relations.filter(
     (relation) =>
-      isActiveLogical(relation) && relation.target === l2Id && getNode(snapshot, relation.source)?.role === "L1",
+      isActiveLogical(relation) &&
+      hasReasoningSource(snapshot, relation) &&
+      relation.target === l2Id &&
+      getNode(snapshot, relation.source)?.role === "L1",
   );
   const outbound = snapshot.relations.filter(
     (relation) =>
-      isActiveLogical(relation) && relation.source === l2Id && getNode(snapshot, relation.target)?.role === "L3",
+      isActiveLogical(relation) &&
+      hasReasoningSource(snapshot, relation) &&
+      relation.source === l2Id &&
+      getNode(snapshot, relation.target)?.role === "L3",
   );
-  return inbound.flatMap((left) =>
-    outbound.map((right) => ({
-      id: `${l2Id}:${left.source}:${right.target}`,
-      l1Id: left.source,
-      l3Id: right.target,
-      relationIds: [left.id, right.id],
-      family: [left.context, right.context].filter(Boolean).join(" / ") || "未设条件",
-    })),
-  );
+  const pairs: Array<[KnowledgeRelation, KnowledgeRelation]> = [];
+  const seen = new Set<string>();
+  const appendPair = (left: KnowledgeRelation, right: KnowledgeRelation) => {
+    const key = `${left.id}\u0000${right.id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pairs.push([left, right]);
+  };
+
+  for (const left of inbound) {
+    for (const right of outbound) {
+      const samePath = left.bridgePathId && left.bridgePathId === right.bridgePathId;
+      const sameContext = !left.bridgePathId && !right.bridgePathId && left.context && left.context === right.context;
+      if (samePath || sameContext) appendPair(left, right);
+    }
+  }
+  if (inbound.length === 1) for (const right of outbound) appendPair(inbound[0], right);
+  if (outbound.length === 1) for (const left of inbound) appendPair(left, outbound[0]);
+
+  return pairs.map(([left, right]) => ({
+    id: left.bridgePathId ?? right.bridgePathId ?? `${l2Id}:${left.source}:${right.target}:${left.id}:${right.id}`,
+    l1Id: left.source,
+    l3Id: right.target,
+    relationIds: [left.id, right.id],
+    family:
+      [left.context, right.context]
+        .filter(Boolean)
+        .filter((value, index, all) => all.indexOf(value) === index)
+        .join(" / ") || "未设条件",
+  }));
 }
 
 export function freezeL2(snapshot: VaultSnapshot, l2Id: string): VaultSnapshot {
-  const paths = collectFrozenPaths(snapshot, l2Id);
-  const frozenRelationIds = new Set(paths.flatMap((path) => path.relationIds));
-  return {
+  return enforceFrozenL2Governance({
     ...snapshot,
     nodes: snapshot.nodes.map((node) => (node.id === l2Id ? { ...node, status: "frozen" } : node)),
-    relations: snapshot.relations.map((relation) =>
-      frozenRelationIds.has(relation.id) && relation.status === "formal"
-        ? { ...relation, status: "frozen" as RelationStatus }
-        : relation,
-    ),
-  };
+  });
 }
 
 function relationConnects(snapshot: VaultSnapshot, source: string, target: string): boolean {
@@ -257,7 +345,8 @@ function relationConnects(snapshot: VaultSnapshot, source: string, target: strin
       relation.source === source &&
       relation.target === target &&
       relation.layer === "logical" &&
-      relation.status === "formal",
+      relation.status === "formal" &&
+      hasReasoningSource(snapshot, relation),
   );
 }
 
@@ -299,7 +388,13 @@ export function buildFrozenL2MigrationPreview(
   };
 }
 
-function migratedRelation(id: string, source: string, target: string, label: string): KnowledgeRelation {
+function migratedRelation(
+  id: string,
+  source: string,
+  target: string,
+  label: string,
+  bridgePathId: string,
+): KnowledgeRelation {
   return {
     id,
     source,
@@ -309,6 +404,7 @@ function migratedRelation(id: string, source: string, target: string, label: str
     status: "formal",
     kind: "structure",
     logicalOutcome: "compatible",
+    bridgePathId,
   };
 }
 
@@ -329,12 +425,24 @@ export function applyHighConfidenceMigration(
   for (const mapping of mappings) {
     if (!relationConnects({ ...snapshot, relations }, mapping.path.l1Id, mapping.replacementL2Id)) {
       relations.push(
-        migratedRelation(`${recordId}:${mapping.path.id}:in`, mapping.path.l1Id, mapping.replacementL2Id, "替代桥接"),
+        migratedRelation(
+          `${recordId}:${mapping.path.id}:in`,
+          mapping.path.l1Id,
+          mapping.replacementL2Id,
+          "替代桥接",
+          `${recordId}:${mapping.path.id}`,
+        ),
       );
     }
     if (!relationConnects({ ...snapshot, relations }, mapping.replacementL2Id, mapping.path.l3Id)) {
       relations.push(
-        migratedRelation(`${recordId}:${mapping.path.id}:out`, mapping.replacementL2Id, mapping.path.l3Id, "替代桥接"),
+        migratedRelation(
+          `${recordId}:${mapping.path.id}:out`,
+          mapping.replacementL2Id,
+          mapping.path.l3Id,
+          "替代桥接",
+          `${recordId}:${mapping.path.id}`,
+        ),
       );
     }
   }

@@ -8,10 +8,30 @@ import { Textarea } from "@/components/ui/textarea";
 import type { Project } from "@/core/Project";
 import { loadAiConnection, saveAiConnection, type AiConnectionSettings } from "@/knowledge-bridge/aiSettings";
 import { LocalKnowledgeBridgeBackend, type KnowledgeBridgeBackend } from "@/knowledge-bridge/backend";
-import { collectVaultFiles, indexMarkdown, toPending } from "@/knowledge-bridge/indexer";
-import { GraphLedger } from "@/knowledge-bridge/ledger";
+import { suggestBridge, type BridgeSuggestion } from "@/knowledge-bridge/bridgeAi";
+import {
+  INDEX_CACHE_METADATA_KEY,
+  indexVaultIncrementally,
+  markMissingSources,
+  syncChangedNodeSources,
+  toPending,
+  type IndexedFile,
+} from "@/knowledge-bridge/indexer";
+import { GraphLedger, type LedgerSideEffects } from "@/knowledge-bridge/ledger";
 import { rejectPendingMcpRequests } from "@/knowledge-bridge/mcpOrchestrator";
-import { createAgentProposalOperation, createCanvasPositionOperation } from "@/knowledge-bridge/operations";
+import {
+  createAgentProposalOperation,
+  createCanvasPositionOperation,
+  createNodeDetailsOperation,
+  createPendingResolutionOperation,
+} from "@/knowledge-bridge/operations";
+import { writeLineageBinding, type PendingResolutionAction } from "@/knowledge-bridge/pending";
+import {
+  markdownBody,
+  mergeMarkdownBody,
+  prepareManagedLinkWrite,
+  reconcileVaultManagedLinks,
+} from "@/knowledge-bridge/sync";
 import {
   applyHighConfidenceMigration,
   buildFrozenL2MigrationPreview,
@@ -27,6 +47,7 @@ import {
   type McpToolRequestStatus,
   type PaperBridgeDraft,
   type PendingMention,
+  type VaultFile,
   type VaultSnapshot,
 } from "@/knowledge-bridge/model";
 import {
@@ -57,6 +78,7 @@ import {
   X,
 } from "lucide-react";
 import { useAtomValue } from "jotai";
+import { Vector } from "@graphif/data-structures";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { activeResourceTabAtom } from "@/state";
@@ -66,6 +88,8 @@ const kindLabels: Record<PendingMention["kind"], string> = {
   orphan: "孤立来源",
   lineage: "血缘候选",
   "ai-bridge": "AI 桥梁",
+  "scale-gap": "尺度鸿沟",
+  "severed-link": "已剪断链接",
 };
 
 export interface KnowledgeBridgeLaunchOptions {
@@ -166,6 +190,51 @@ function Metric({ label, value }: { label: string; value: string | number }) {
     <div className="min-w-0 flex-1 border-r px-3 last:border-r-0">
       <div className="text-muted-foreground text-[11px]">{label}</div>
       <div className="mt-0.5 text-sm font-semibold tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+interface HoverPreviewState {
+  nodeId: string;
+  x: number;
+  y: number;
+}
+
+function HoverPreviewLayer({ preview, snapshot }: { preview?: HoverPreviewState; snapshot: VaultSnapshot }) {
+  if (!preview) return null;
+  const node = snapshot.nodes.find((item) => item.id === preview.nodeId);
+  if (!node) return null;
+  const lines = (node.detailsMarkdown ?? node.content)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && line !== "---" && !line.startsWith("kb-id:") && !line.startsWith("#"))
+    .slice(0, 3);
+  const relationCount = snapshot.relations.filter(
+    (relation) => relation.source === node.id || relation.target === node.id,
+  ).length;
+  const sourceStatus = node.status === "missing-source" ? "来源缺失" : node.path ? "Vault 来源" : "账本节点";
+  return (
+    <div
+      className="bg-popover text-popover-foreground pointer-events-none fixed z-[120] w-72 rounded-md border p-3 shadow-lg"
+      style={{ left: preview.x, top: preview.y }}
+    >
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className="h-4 px-1 text-[9px]">
+          {node.role}
+        </Badge>
+        <span className="min-w-0 flex-1 truncate text-xs font-medium">{node.title}</span>
+      </div>
+      <div className="text-muted-foreground mt-2 space-y-1 text-[11px] leading-4">
+        {(lines.length ? lines : ["暂无正文"]).map((line, index) => (
+          <div key={`${node.id}:${index}`} className="line-clamp-1">
+            {line}
+          </div>
+        ))}
+      </div>
+      <div className="text-muted-foreground mt-2 flex gap-3 border-t pt-2 text-[10px]">
+        <span>{relationCount} 条关系</span>
+        <span>{sourceStatus}</span>
+      </div>
     </div>
   );
 }
@@ -515,8 +584,21 @@ function PaperBridgePanel({
   );
 }
 
-function PendingRow({ item, onResolve }: { item: PendingMention; onResolve: (id: string, accepted: boolean) => void }) {
-  const Icon = item.kind === "lineage" ? FileQuestion : item.kind === "ai-bridge" ? Sparkles : Link2;
+function PendingRow({
+  item,
+  onResolve,
+}: {
+  item: PendingMention;
+  onResolve: (id: string, action: PendingResolutionAction, candidateId?: string) => void;
+}) {
+  const Icon =
+    item.kind === "lineage"
+      ? FileQuestion
+      : item.kind === "ai-bridge"
+        ? Sparkles
+        : item.kind === "scale-gap"
+          ? Scale
+          : Link2;
   return (
     <div className="border-b px-3 py-2.5 last:border-b-0">
       <div className="flex items-start gap-2">
@@ -531,15 +613,98 @@ function PendingRow({ item, onResolve }: { item: PendingMention; onResolve: (id:
           <div className="text-muted-foreground mt-1 truncate text-[11px]">{item.filePath}</div>
           <div className="text-muted-foreground mt-1 text-xs leading-5">{item.raw}</div>
         </div>
-        <div className="flex shrink-0 gap-1">
-          <Button size="icon" variant="ghost" className="size-7" title="确认" onClick={() => onResolve(item.id, true)}>
-            <Check className="size-3.5" />
+        {item.kind !== "lineage" && item.kind !== "scale-gap" && item.kind !== "severed-link" && (
+          <div className="flex shrink-0 gap-1">
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7"
+              title="采用为待定认知关系"
+              onClick={() => onResolve(item.id, "accept")}
+            >
+              <Check className="size-3.5" />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              className="size-7"
+              title="忽略"
+              onClick={() => onResolve(item.id, "dismiss")}
+            >
+              <X className="size-3.5" />
+            </Button>
+          </div>
+        )}
+      </div>
+      {item.kind === "lineage" && (
+        <div className="mt-2 ml-6 space-y-2">
+          {(item.candidates ?? []).slice(0, 3).map((candidate) => (
+            <div key={candidate.id} className="flex items-center gap-2 border-l pl-2 text-xs">
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">{candidate.title}</div>
+                <div className="text-muted-foreground line-clamp-2">{candidate.reason}</div>
+              </div>
+              <span className="text-muted-foreground tabular-nums">{Math.round(candidate.confidence * 100)}%</span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 text-[11px]"
+                onClick={() => onResolve(item.id, "lineage-rebind", candidate.id)}
+              >
+                重新绑定
+              </Button>
+            </div>
+          ))}
+          {(item.candidates?.length ?? 0) === 0 && (
+            <div className="text-muted-foreground border-l pl-2 text-[11px]">没有足够可靠的旧节点候选。</div>
+          )}
+          <div className="flex gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 flex-1 text-[11px]"
+              onClick={() => onResolve(item.id, "lineage-new")}
+            >
+              确认为新节点
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-[11px]"
+              onClick={() => onResolve(item.id, "lineage-defer")}
+            >
+              {item.deferredAt ? "继续暂存" : "暂不处理"}
+            </Button>
+          </div>
+        </div>
+      )}
+      {item.kind === "scale-gap" && (
+        <div className="text-muted-foreground mt-2 ml-6 border-l pl-2 text-[11px]">
+          补全并确认尺度换算协议后，该任务会自动解除；不能直接确认为强因果关系。
+        </div>
+      )}
+      {item.kind === "severed-link" && (
+        <div className="mt-2 ml-6 flex items-center gap-2">
+          <div className="text-muted-foreground min-w-0 flex-1 text-[11px]">保持剪断不会影响历史记录。</div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => onResolve(item.id, "restore-managed-link")}
+          >
+            <ArchiveRestore />
+            恢复链接
           </Button>
-          <Button size="icon" variant="ghost" className="size-7" title="忽略" onClick={() => onResolve(item.id, false)}>
-            <X className="size-3.5" />
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 px-2 text-[11px]"
+            onClick={() => onResolve(item.id, "dismiss")}
+          >
+            保留剪断
           </Button>
         </div>
-      </div>
+      )}
     </div>
   );
 }
@@ -549,7 +714,7 @@ function PendingPool({
   onResolve,
 }: {
   items: PendingMention[];
-  onResolve: (id: string, accepted: boolean) => void;
+  onResolve: (id: string, action: PendingResolutionAction, candidateId?: string) => void;
 }) {
   return (
     <div className="overflow-hidden rounded-md border">
@@ -571,28 +736,171 @@ function PendingPool({
 
 function BridgeSuggestions({
   snapshot,
+  connection,
   onFreeze,
+  onAdoptSuggestion,
   onApplyMigration,
 }: {
   snapshot: VaultSnapshot;
+  connection: AiConnectionSettings;
   onFreeze: (l2Id: string) => void;
-  onApplyMigration: (preview: ReturnType<typeof buildFrozenL2MigrationPreview>) => void;
+  onAdoptSuggestion: (nodeId: string, suggestion: BridgeSuggestion) => void;
+  onApplyMigration: (preview: ReturnType<typeof buildFrozenL2MigrationPreview>, pathIds: Set<string>) => void;
 }) {
-  const anchor = snapshot.nodes.find((node) => node.role === "L1" && node.sourceKind !== "denied");
+  const anchor = snapshot.nodes.find(
+    (node) =>
+      node.role === "L1" &&
+      node.status !== "missing-source" &&
+      node.status !== "frozen" &&
+      node.sourceKind !== "denied",
+  );
   const l2Nodes = snapshot.nodes.filter((node) => node.role === "L2");
   const frozenL2 = l2Nodes.find((node) => node.status === "frozen");
+  const l3Nodes = snapshot.nodes.filter(
+    (node) => node.role === "L3" && node.status !== "missing-source" && node.status !== "frozen",
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState(l3Nodes[0]?.id ?? "");
+  const [suggestion, setSuggestion] = useState<BridgeSuggestion>();
+  const [suggesting, setSuggesting] = useState(false);
+  useEffect(() => {
+    if (!l3Nodes.some((node) => node.id === selectedNodeId)) setSelectedNodeId(l3Nodes[0]?.id ?? "");
+  }, [l3Nodes, selectedNodeId]);
+  useEffect(() => setSuggestion(undefined), [selectedNodeId]);
   const preview = useMemo(
     () => (frozenL2 ? buildFrozenL2MigrationPreview(snapshot, frozenL2.id, 0) : undefined),
     [frozenL2?.id, snapshot],
   );
-  const highConfidenceCount =
-    preview?.paths.filter((entry) => {
-      const best = entry.candidates[0];
-      return best && best.confidence >= 0.8 && !best.conflict;
-    }).length ?? 0;
+  const eligiblePathIds = useMemo(
+    () =>
+      new Set(
+        (preview?.paths ?? []).flatMap((entry) => {
+          const best = entry.candidates[0];
+          return best && best.confidence >= 0.8 && !best.conflict ? [entry.path.id] : [];
+        }),
+      ),
+    [preview],
+  );
+  const [selectedPathIds, setSelectedPathIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => setSelectedPathIds(new Set(eligiblePathIds)), [eligiblePathIds]);
+  const pathFamilies = useMemo(() => {
+    const grouped = new Map<string, NonNullable<typeof preview>["paths"]>();
+    for (const entry of preview?.paths ?? []) {
+      const entries = grouped.get(entry.path.family) ?? [];
+      entries.push(entry);
+      grouped.set(entry.path.family, entries);
+    }
+    return [...grouped.entries()];
+  }, [preview]);
+  const highConfidenceCount = eligiblePathIds.size;
+  const togglePath = (pathId: string, checked: boolean) => {
+    setSelectedPathIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(pathId);
+      else next.delete(pathId);
+      return next;
+    });
+  };
+  const toggleFamily = (pathIds: string[], checked: boolean) => {
+    setSelectedPathIds((current) => {
+      const next = new Set(current);
+      for (const pathId of pathIds) {
+        if (!eligiblePathIds.has(pathId)) continue;
+        if (checked) next.add(pathId);
+        else next.delete(pathId);
+      }
+      return next;
+    });
+  };
+  const generateSuggestion = async () => {
+    const selected = snapshot.nodes.find((node) => node.id === selectedNodeId);
+    if (!selected) return;
+    setSuggesting(true);
+    try {
+      setSuggestion(await suggestBridge(selected, snapshot.nodes, connection));
+    } catch (error) {
+      toast.error(`桥梁建议生成失败：${String(error)}`);
+    } finally {
+      setSuggesting(false);
+    }
+  };
 
   return (
     <div className="space-y-3">
+      <div className="overflow-hidden rounded-md border">
+        <div className="bg-muted/35 flex items-center justify-between border-b px-3 py-2">
+          <div className="flex items-center gap-2 text-xs font-medium">
+            <Sparkles className="size-3.5" />
+            AI 搭桥草稿
+          </div>
+          <Badge variant="outline">{connection.endpoint ? "远程 AI" : "本地草拟"}</Badge>
+        </div>
+        <div className="space-y-2 p-3">
+          <div className="flex max-h-20 flex-wrap gap-1 overflow-y-auto">
+            {l3Nodes.map((node) => (
+              <Button
+                key={node.id}
+                size="sm"
+                variant={selectedNodeId === node.id ? "secondary" : "ghost"}
+                className="h-6 max-w-full px-2 text-[10px]"
+                onClick={() => setSelectedNodeId(node.id)}
+              >
+                <span className="truncate">{node.title}</span>
+              </Button>
+            ))}
+          </div>
+          <Button
+            className="w-full"
+            size="sm"
+            disabled={!selectedNodeId || suggesting}
+            onClick={() => void generateSuggestion()}
+          >
+            {suggesting ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
+            {suggesting ? "正在比较机制" : "生成桥梁建议"}
+          </Button>
+          {suggestion && (
+            <div className="space-y-2 border-t pt-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-medium">
+                  L2 {snapshot.nodes.find((node) => node.id === suggestion.bridgeId)?.title ?? suggestion.bridgeId}
+                </span>
+                <Badge variant="secondary">{Math.round(suggestion.confidence * 100)}%</Badge>
+              </div>
+              <div className="text-muted-foreground leading-5">{suggestion.reason}</div>
+              <div className="border-l pl-2">
+                <div className="font-medium">
+                  L1 {snapshot.nodes.find((node) => node.id === suggestion.anchorId)?.title ?? "无可用锚点"}
+                </div>
+                <div className="text-muted-foreground mt-1 leading-4">{suggestion.anchorReason}</div>
+                {suggestion.anchorEvidence.length > 0 && (
+                  <div className="text-muted-foreground mt-1">依据：{suggestion.anchorEvidence.join("、")}</div>
+                )}
+              </div>
+              {(suggestion.alternatives.length > 0 || suggestion.anchorAlternatives.length > 0) && (
+                <div className="text-muted-foreground text-[11px] leading-4">
+                  备选机制：
+                  {suggestion.alternatives
+                    .map((item) => snapshot.nodes.find((node) => node.id === item.id)?.title ?? item.id)
+                    .join("、") || "无"}
+                  <br />
+                  备选锚点：
+                  {suggestion.anchorAlternatives
+                    .map((item) => snapshot.nodes.find((node) => node.id === item.id)?.title ?? item.id)
+                    .join("、") || "无"}
+                </div>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="w-full"
+                onClick={() => onAdoptSuggestion(selectedNodeId, suggestion)}
+              >
+                采用为待确认路径
+              </Button>
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="overflow-hidden rounded-md border">
         <div className="bg-muted/35 flex items-center gap-2 border-b px-3 py-2 text-xs font-medium">
           <Bot className="size-3.5" />
@@ -628,32 +936,90 @@ function BridgeSuggestions({
           <>
             <div className="space-y-1 border-b px-3 py-2.5 text-xs">
               <div className="font-medium">历史路径 ×{preview.paths.length}</div>
-              <div className="text-muted-foreground">仅预选 {highConfidenceCount} 条高置信、无冲突路径。</div>
+              <div className="text-muted-foreground">
+                可迁移 {highConfidenceCount}/{preview.paths.length} 条（
+                {preview.paths.length ? Math.round((highConfidenceCount / preview.paths.length) * 100) : 0}%），当前选择
+                {selectedPathIds.size} 条；其余继续冻结。
+              </div>
             </div>
-            {preview.paths.slice(0, 3).map((entry) => {
-              const best = entry.candidates[0];
-              return (
-                <div key={entry.path.id} className="flex items-center gap-2 border-b px-3 py-2.5 last:border-b-0">
-                  <span className="text-muted-foreground w-4 text-xs">
-                    {entry.path.family === "未设条件" ? "-" : "~"}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-sm">
-                    {best ? snapshot.nodes.find((node) => node.id === best.l2Id)?.title : "无可靠替代"}
-                  </span>
-                  <span className="text-muted-foreground text-xs tabular-nums">
-                    {best ? `${Math.round(best.confidence * 100)}%` : "冻结"}
-                  </span>
+            <div className="max-h-80 overflow-y-auto">
+              {pathFamilies.map(([family, entries]) => {
+                const eligibleFamilyIds = entries
+                  .map((entry) => entry.path.id)
+                  .filter((pathId) => eligiblePathIds.has(pathId));
+                const familyChecked =
+                  eligibleFamilyIds.length > 0 && eligibleFamilyIds.every((pathId) => selectedPathIds.has(pathId));
+                return (
+                  <details key={family} className="border-b last:border-b-0">
+                    <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs">
+                      <Checkbox
+                        checked={familyChecked}
+                        disabled={eligibleFamilyIds.length === 0}
+                        onCheckedChange={(checked) => toggleFamily(eligibleFamilyIds, checked === true)}
+                        onClick={(event) => event.stopPropagation()}
+                        aria-label={`选择路径族 ${family}`}
+                      />
+                      <span className="min-w-0 flex-1 truncate font-medium">{family}</span>
+                      <span className="text-muted-foreground tabular-nums">
+                        {eligibleFamilyIds.length}/{entries.length}
+                      </span>
+                    </summary>
+                    <div className="border-t">
+                      {entries.map((entry) => {
+                        const best = entry.candidates[0];
+                        const eligible = eligiblePathIds.has(entry.path.id);
+                        const l1 = snapshot.nodes.find((node) => node.id === entry.path.l1Id)?.title ?? entry.path.l1Id;
+                        const l3 = snapshot.nodes.find((node) => node.id === entry.path.l3Id)?.title ?? entry.path.l3Id;
+                        return (
+                          <div key={entry.path.id} className="space-y-1.5 border-b px-3 py-2 last:border-b-0">
+                            <div className="flex items-center gap-2 text-xs">
+                              <Checkbox
+                                checked={selectedPathIds.has(entry.path.id)}
+                                disabled={!eligible}
+                                onCheckedChange={(checked) => togglePath(entry.path.id, checked === true)}
+                                aria-label={`选择 ${l1} 到 ${l3} 的迁移`}
+                              />
+                              <span className="min-w-0 flex-1 truncate">
+                                {l1} → {l3}
+                              </span>
+                              <span className="text-muted-foreground tabular-nums">
+                                {best ? `${Math.round(best.confidence * 100)}%` : "冻结"}
+                              </span>
+                            </div>
+                            {entry.candidates.slice(0, 3).map((candidate, index) => (
+                              <div
+                                key={`${entry.path.id}:${candidate.l2Id}`}
+                                className="text-muted-foreground ml-6 text-[11px] leading-4"
+                              >
+                                {index + 1}.{" "}
+                                {snapshot.nodes.find((node) => node.id === candidate.l2Id)?.title ?? candidate.l2Id}
+                                {` · 语义损失 ${candidate.semanticLoss}`}
+                                {candidate.conditionChange ? ` · ${candidate.conditionChange}` : ""}
+                                {candidate.conflict ? ` · ${candidate.conflict}` : ""}
+                                <span className="block">{candidate.reason}</span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </details>
+                );
+              })}
+              {preview.paths.length === 0 && (
+                <div className="text-muted-foreground px-3 py-5 text-center text-xs">
+                  旧账本没有可核验的实际路径标识，系统不会制造 L1×L3 组合。
                 </div>
-              );
-            })}
+              )}
+            </div>
             <div className="p-2">
               <Button
                 size="sm"
                 className="w-full"
-                disabled={highConfidenceCount === 0}
-                onClick={() => onApplyMigration(preview)}
+                disabled={selectedPathIds.size === 0}
+                onClick={() => onApplyMigration(preview, selectedPathIds)}
               >
-                应用高置信替代
+                应用已选替代（{selectedPathIds.size}）
               </Button>
             </div>
           </>
@@ -705,13 +1071,24 @@ function EvidencePanel({
   snapshot: VaultSnapshot;
   onSelectLens: (lensId: string) => void;
 }) {
-  const tension = snapshot.relations.find((relation) => relation.evidence?.length);
-  const readings = tension?.evidence ?? [];
-  const protocol = snapshot.protocols[0];
+  const readings = snapshot.relations.flatMap((relation) =>
+    (relation.evidence ?? []).map((reading) => ({ relation, reading })),
+  );
+  const supportLevels = [
+    ...new Set(
+      readings.filter(({ reading }) => reading.direction !== "challenges").map(({ reading }) => reading.level),
+    ),
+  ];
+  const challengeLevels = [
+    ...new Set(readings.filter(({ reading }) => reading.direction !== "supports").map(({ reading }) => reading.level)),
+  ];
+  const hasTension =
+    readings.some(({ reading }) => reading.direction === "mixed") ||
+    (supportLevels.length > 0 && challengeLevels.length > 0);
   const bundledRelations = relationBundles(snapshot);
-  const secondaryCount = bundledRelations.reduce((count, bundle) => count + bundle.secondary.length, 0);
-  const cognitiveSecondaryCount = bundledRelations.reduce(
-    (count, bundle) => count + bundle.secondary.filter((relation) => relation.layer === "cognitive").length,
+  const hiddenCognitiveCount = bundledRelations.reduce((count, bundle) => count + bundle.hiddenCognitiveCount, 0);
+  const bundledLogicalCount = bundledRelations.reduce(
+    (count, bundle) => count + Math.max(0, bundle.logical.length - 1),
     0,
   );
   return (
@@ -722,27 +1099,79 @@ function EvidencePanel({
             <ShieldCheck className="size-3.5" />
             证据张力线
           </div>
-          <Badge variant="outline">{tension ? "多视角" : "暂无评价"}</Badge>
+          <Badge variant="outline">
+            {readings.length ? (hasTension ? "张力共存" : `${readings.length} 项评价`) : "暂无评价"}
+          </Badge>
         </div>
         <div className="space-y-3 p-3">
-          <div className="h-0.5 w-full bg-[linear-gradient(90deg,#3b82f6_0_45%,transparent_45%_55%,#ef4444_55%_100%)]" />
-          <div className="grid grid-cols-2 gap-2 text-xs">
-            {readings.slice(0, 2).map((reading) => (
-              <div
-                key={`${reading.perspective}:${reading.direction}`}
-                className={reading.direction === "challenges" ? "text-right" : ""}
-              >
-                <div
-                  className={
-                    reading.direction === "challenges" ? "font-medium text-red-400" : "font-medium text-blue-400"
-                  }
-                >
-                  {reading.level} {reading.direction === "challenges" ? "反驳" : "支持"}
-                </div>
-                <div className="text-muted-foreground mt-1">{reading.perspective}</div>
-              </div>
-            ))}
-          </div>
+          <div
+            className={
+              hasTension
+                ? "h-0.5 w-full bg-[linear-gradient(90deg,#3b82f6_0_45%,transparent_45%_55%,#ef4444_55%_100%)]"
+                : "bg-muted h-0.5 w-full"
+            }
+          />
+          {readings.length > 0 ? (
+            <div className="space-y-2 text-xs">
+              {readings.map(({ relation, reading }, index) => {
+                const lens = snapshot.lenses.find((item) => item.id === reading.lensId);
+                const source = snapshot.nodes.find((node) => node.id === relation.source)?.title ?? relation.source;
+                const target = snapshot.nodes.find((node) => node.id === relation.target)?.title ?? relation.target;
+                return (
+                  <div
+                    key={`${relation.id}:${reading.perspective}:${reading.direction}:${index}`}
+                    className="border-l pl-2"
+                  >
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span
+                        className={
+                          reading.direction === "challenges"
+                            ? "font-medium text-red-400"
+                            : reading.direction === "mixed"
+                              ? "font-medium text-amber-400"
+                              : "font-medium text-blue-400"
+                        }
+                      >
+                        {reading.level}{" "}
+                        {reading.direction === "challenges" ? "反驳" : reading.direction === "mixed" ? "双向" : "支持"}
+                      </span>
+                      <Badge variant="outline" className="h-4 px-1 text-[9px]">
+                        {reading.perspective}
+                      </Badge>
+                      {lens && (
+                        <Badge variant={lens.active ? "secondary" : "outline"} className="h-4 px-1 text-[9px]">
+                          {lens.title}
+                        </Badge>
+                      )}
+                      {reading.evaluatedAt && (
+                        <span className="text-muted-foreground">
+                          {new Date(reading.evaluatedAt).toLocaleDateString()}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-muted-foreground mt-1">
+                      {source} → {target}
+                    </div>
+                    <div className="text-muted-foreground mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[11px]">
+                      <span>直接性：{reading.directness ?? "未判定"}</span>
+                      <span>方法：{reading.methodQuality ?? "未判定"}</span>
+                      <span>复核：{reading.verifiability ?? "未判定"}</span>
+                      <span>范围：{reading.applicability ?? "未注明"}</span>
+                    </div>
+                    {reading.note && <div className="text-muted-foreground mt-1 leading-4">{reading.note}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-muted-foreground py-2 text-center text-xs">尚未建立证据评价</div>
+          )}
+          {readings.length > 0 && (
+            <div className="text-muted-foreground text-[11px]">
+              支持：{supportLevels.join("、") || "无"}；反驳：{challengeLevels.join("、") || "无"}
+              。各视角独立保存，不做平均。
+            </div>
+          )}
         </div>
       </div>
 
@@ -751,18 +1180,28 @@ function EvidencePanel({
           <Scale className="size-3.5" />
           尺度换算协议
         </div>
-        <div className="p-3">
-          <div className="flex items-center gap-2 text-xs">
-            <Badge variant="outline">分子</Badge>
-            <span className="text-muted-foreground">→</span>
-            <Badge variant="outline">个体</Badge>
-            <Badge className="ml-auto" variant="secondary">
-              {protocol?.status === "confirmed" ? "已引用" : "尺度鸿沟"}
-            </Badge>
-          </div>
-          <div className="text-muted-foreground mt-3 text-xs leading-6">
-            {protocol?.mechanismSteps.join(" → ") ?? "需要补充中间机制"}
-          </div>
+        <div className="divide-y">
+          {snapshot.protocols.map((protocol) => (
+            <div key={protocol.id} className="p-3">
+              <div className="flex items-center gap-2 text-xs">
+                <Badge variant="outline">{protocol.sourceScale}</Badge>
+                <span className="text-muted-foreground">→</span>
+                <Badge variant="outline">{protocol.targetScale}</Badge>
+                <Badge className="ml-auto" variant={protocol.status === "confirmed" ? "secondary" : "outline"}>
+                  {protocol.status === "confirmed" ? "已确认" : "尺度鸿沟"}
+                </Badge>
+              </div>
+              <div className="text-muted-foreground mt-2 text-xs leading-5">
+                {protocol.mechanismSteps.join(" → ") || "需要补充中间机制"}
+              </div>
+              {protocol.boundary && (
+                <div className="text-muted-foreground mt-1 border-l pl-2 text-[11px]">边界：{protocol.boundary}</div>
+              )}
+            </div>
+          ))}
+          {snapshot.protocols.length === 0 && (
+            <div className="text-muted-foreground px-3 py-5 text-center text-xs">尚未建立尺度换算协议</div>
+          )}
         </div>
       </div>
 
@@ -791,7 +1230,7 @@ function EvidencePanel({
         <div className="min-w-0 flex-1 text-xs">
           <span className="font-medium">关系束</span>
           <span className="text-muted-foreground ml-2">
-            {secondaryCount} 条次级关系，含 {cognitiveSecondaryCount} 条认知脚手架
+            {bundledLogicalCount} 条逻辑关系已折叠，{hiddenCognitiveCount} 条认知脚手架默认隐藏
           </span>
         </div>
       </div>
@@ -819,6 +1258,7 @@ export default function KnowledgeBridgeWindow({
   const [aiConnection, setAiConnection] = useState<AiConnectionSettings>(() => loadAiConnection());
   const [anchorInput, setAnchorInput] = useState("");
   const [indexProgress, setIndexProgress] = useState<IndexProgress>({ phase: "idle", current: 0, total: 0 });
+  const [hoverPreview, setHoverPreview] = useState<HoverPreviewState>();
   const snapshotRef = useRef(snapshot);
   const ledgerRef = useRef<GraphLedger | undefined>(undefined);
   const backendRef = useRef<LocalKnowledgeBridgeBackend | undefined>(undefined);
@@ -858,16 +1298,65 @@ export default function KnowledgeBridgeWindow({
     };
   }, [activeProject, ledgerStatus, snapshot]);
 
-  const commitSnapshot = (next: VaultSnapshot, kind: string, operation?: KnowledgeGraphOperationMeta): boolean => {
+  useEffect(() => {
+    if (ledgerStatus !== "ready" || !activeProject) return;
+    const canvas = activeProject.canvas.element;
+    let timer: number | undefined;
+    let hoveredNodeId: string | undefined;
+    const close = () => {
+      hoveredNodeId = undefined;
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = undefined;
+      setHoverPreview(undefined);
+    };
+    const onMove = (event: MouseEvent) => {
+      const world = activeProject.renderer.transformView2World(new Vector(event.clientX, event.clientY));
+      const entity = activeProject.stageManager.findEntityByLocation(world);
+      const uuid = entity?.uuid ?? "";
+      const nodeId = uuid.startsWith("kb:node:") ? uuid.slice("kb:node:".length) : undefined;
+      if (nodeId === hoveredNodeId) return;
+      close();
+      if (!nodeId) return;
+      hoveredNodeId = nodeId;
+      const x = Math.max(8, Math.min(window.innerWidth - 304, event.clientX + 16));
+      const y = Math.max(8, Math.min(window.innerHeight - 150, event.clientY + 16));
+      timer = window.setTimeout(() => {
+        if (hoveredNodeId === nodeId) setHoverPreview({ nodeId, x, y });
+      }, 800);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    canvas.addEventListener("mousemove", onMove);
+    canvas.addEventListener("mouseleave", close);
+    canvas.addEventListener("wheel", close, { passive: true });
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      close();
+      canvas.removeEventListener("mousemove", onMove);
+      canvas.removeEventListener("mouseleave", close);
+      canvas.removeEventListener("wheel", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [activeProject, ledgerStatus]);
+
+  const commitSnapshot = (
+    next: VaultSnapshot,
+    kind: string,
+    operation?: KnowledgeGraphOperationMeta,
+    sideEffects?: LedgerSideEffects,
+  ): boolean => {
     const backend = backendRef.current;
     if (!backend) {
       toast.error("关系账本尚未就绪，请稍后重试。");
       return false;
     }
     try {
-      backend.commit({ snapshot: next, kind, operation });
-      snapshotRef.current = next;
-      setSnapshot(next);
+      const persisted = backend.commit({ snapshot: next, kind, operation, sideEffects });
+      snapshotRef.current = persisted;
+      setSnapshot(persisted);
       return true;
     } catch (error) {
       const message = String(error);
@@ -882,24 +1371,79 @@ export default function KnowledgeBridgeWindow({
     if (ledgerStatus !== "ready" || !activeProject) return;
     let cancelled = false;
     let timer: number | undefined;
-    void import("@/knowledge-bridge/canvas").then(({ readKnowledgeBridgeCanvasPositions }) => {
-      const persistMovedNodes = () => {
-        if (cancelled) return;
-        const operation = createCanvasPositionOperation(readKnowledgeBridgeCanvasPositions(activeProject));
-        const backend = backendRef.current;
-        if (!backend) return;
-        const applied = backend.applyOperation(snapshotRef.current, operation);
-        if (applied.changed) {
-          snapshotRef.current = applied.snapshot;
-          setSnapshot(applied.snapshot);
-        }
-      };
-      persistMovedNodes();
-      timer = window.setInterval(persistMovedNodes, 350);
-    });
+    let detailsTimer: number | undefined;
+    let pendingDetailsSignature = "";
+    let lastCommittedDetailsSignature = "";
+    void import("@/knowledge-bridge/canvas").then(
+      ({
+        readChangedKnowledgeBridgeCanvasDetails,
+        readKnowledgeBridgeCanvasPositions,
+        updateKnowledgeBridgeSemanticZoom,
+      }) => {
+        const persistDetails = async () => {
+          const backend = backendRef.current;
+          if (!backend || cancelled) return;
+          const details = readChangedKnowledgeBridgeCanvasDetails(activeProject);
+          if (details.length === 0) return;
+          const signature = JSON.stringify(details);
+          if (signature === lastCommittedDetailsSignature) return;
+          const fileWrites: NonNullable<LedgerSideEffects["fileWrites"]> = [];
+          try {
+            for (const detail of details) {
+              const node = snapshotRef.current.nodes.find((item) => item.id === detail.id);
+              if (!node?.path) continue;
+              const before = await adapterRef.current.read(node.path);
+              const after = mergeMarkdownBody(before, detail.markdown, node.id);
+              if (before === after) continue;
+              await adapterRef.current.write(node.path, after);
+              fileWrites.push({ path: node.path, before, after });
+            }
+            const applied = backend.applyOperation(snapshotRef.current, createNodeDetailsOperation(details), {
+              fileWrites,
+            });
+            if (applied.changed) {
+              lastCommittedDetailsSignature = signature;
+              snapshotRef.current = applied.snapshot;
+              setSnapshot(applied.snapshot);
+            }
+          } catch (error) {
+            await Promise.all(fileWrites.map((write) => adapterRef.current.write(write.path, write.before)));
+            toast.error(`知识详情保存失败：${String(error)}`);
+          }
+        };
+
+        const persistCanvas = () => {
+          if (cancelled) return;
+          updateKnowledgeBridgeSemanticZoom(activeProject);
+          const backend = backendRef.current;
+          if (!backend) return;
+          const positionOperation = createCanvasPositionOperation(readKnowledgeBridgeCanvasPositions(activeProject));
+          const applied = backend.applyOperation(snapshotRef.current, positionOperation);
+          if (applied.changed) {
+            snapshotRef.current = applied.snapshot;
+            setSnapshot(applied.snapshot);
+          }
+
+          const details = readChangedKnowledgeBridgeCanvasDetails(activeProject);
+          const signature = details.length ? JSON.stringify(details) : "";
+          if (!signature) {
+            pendingDetailsSignature = "";
+            if (detailsTimer !== undefined) window.clearTimeout(detailsTimer);
+            detailsTimer = undefined;
+          } else if (signature !== pendingDetailsSignature && signature !== lastCommittedDetailsSignature) {
+            pendingDetailsSignature = signature;
+            if (detailsTimer !== undefined) window.clearTimeout(detailsTimer);
+            detailsTimer = window.setTimeout(() => void persistDetails(), 800);
+          }
+        };
+        persistCanvas();
+        timer = window.setInterval(persistCanvas, 350);
+      },
+    );
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearInterval(timer);
+      if (detailsTimer !== undefined) window.clearTimeout(detailsTimer);
     };
   }, [activeProject, ledgerStatus]);
 
@@ -974,6 +1518,7 @@ export default function KnowledgeBridgeWindow({
             });
           }
           toast.message(`已恢复 ${recentVault.name}，新材料会基于已有锚点继续桥接。`);
+          void startScan(recentVault);
           return;
         } catch (error) {
           recentVaultError = error;
@@ -1076,25 +1621,81 @@ export default function KnowledgeBridgeWindow({
     };
   }, []);
 
-  const startScan = async (adapter = adapterRef.current) => {
+  async function startScan(adapter = adapterRef.current) {
     scanControllerRef.current?.abort();
     const controller = new AbortController();
     scanControllerRef.current = controller;
     setIndexProgress({ phase: "scanning", current: 0, total: 0 });
     try {
-      const files = await collectVaultFiles(adapter, controller.signal, setIndexProgress);
+      const ledger = ledgerRef.current;
+      const cached = ledger?.getMetadata<IndexedFile[]>(INDEX_CACHE_METADATA_KEY) ?? [];
+      const incremental = await indexVaultIncrementally(adapter, cached, controller.signal, setIndexProgress);
       if (controller.signal.aborted) {
-        setIndexProgress({ phase: "cancelled", current: files.length, total: files.length });
+        setIndexProgress({ phase: "cancelled", current: 0, total: incremental.indexed.length });
         return;
       }
-      const indexed = await indexMarkdown(files, controller.signal, setIndexProgress);
-      if (controller.signal.aborted) return;
+      const indexed = incremental.indexed;
       const current = snapshotRef.current;
-      const discovered = toPending(indexed, new Set(current.nodes.map((node) => node.id)));
-      const merged = new Map(current.pending.map((item) => [item.id, item]));
+      const managedSnapshots = ledger?.listSnapshots() ?? [];
+      const indexedByPath = new Map(indexed.map((file) => [file.path, file]));
+      const changedByPath = new Map(incremental.changedFiles.map((file) => [file.path, file]));
+      const sourceHydrationFiles = (
+        await Promise.all(
+          current.nodes
+            .filter(
+              (node) =>
+                node.path &&
+                node.detailsMarkdown === undefined &&
+                indexedByPath.has(node.path) &&
+                !changedByPath.has(node.path),
+            )
+            .map(async (node) => {
+              const metadata = indexedByPath.get(node.path!);
+              if (!metadata) return undefined;
+              return {
+                path: node.path!,
+                content: await adapter.read(node.path!),
+                modifiedAt: metadata.modifiedAt,
+                size: metadata.size,
+              };
+            }),
+        )
+      ).filter((file): file is VaultFile => file !== undefined);
+      const sourceFiles = [...incremental.changedFiles, ...sourceHydrationFiles];
+      const managedFiles = (
+        await Promise.all(
+          [...new Set(managedSnapshots.map((item) => item.filePath))].map(async (path) => {
+            const metadata = indexedByPath.get(path);
+            if (!metadata) return undefined;
+            const changed = changedByPath.get(path);
+            return (
+              changed ?? {
+                path,
+                content: await adapter.read(path),
+                modifiedAt: metadata.modifiedAt,
+                size: metadata.size,
+              }
+            );
+          }),
+        )
+      ).filter((file): file is VaultFile => file !== undefined);
+      const reconciled = await reconcileVaultManagedLinks(current, managedFiles, managedSnapshots);
+      const base = markMissingSources(syncChangedNodeSources(reconciled.snapshot, sourceFiles), indexed);
+      const discovered = toPending(indexed, new Set(base.nodes.map((node) => node.id)), base);
+      const merged = new Map(base.pending.map((item) => [item.id, item]));
       for (const item of discovered) merged.set(item.id, item);
-      if (commitSnapshot({ ...current, pending: [...merged.values()] }, "vault-index")) {
-        toast.success(`后台索引完成，发现 ${discovered.length} 个待处理提及`);
+      if (
+        commitSnapshot({ ...base, pending: [...merged.values()] }, "vault-index", undefined, {
+          deleteLinkSnapshotIds: reconciled.deleteLinkSnapshotIds,
+        })
+      ) {
+        ledger?.setMetadata(INDEX_CACHE_METADATA_KEY, indexed);
+        const edited = reconciled.decisions.filter(
+          ({ decision }) => decision.kind !== "self-write" && decision.kind !== "unchanged",
+        ).length;
+        toast.success(
+          `后台索引完成：复用 ${incremental.reusedCount}，更新 ${incremental.changedFiles.length}，发现 ${discovered.length} 个待处理提及${edited ? `，处理 ${edited} 个托管编辑` : ""}`,
+        );
       }
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") toast.error(`Vault 索引失败：${String(error)}`);
@@ -1102,7 +1703,7 @@ export default function KnowledgeBridgeWindow({
     } finally {
       if (scanControllerRef.current === controller) scanControllerRef.current = undefined;
     }
-  };
+  }
 
   const cancelScan = () => {
     scanControllerRef.current?.abort();
@@ -1154,17 +1755,93 @@ export default function KnowledgeBridgeWindow({
     }
   };
 
-  const resolvePending = (id: string, accepted: boolean) => {
+  const resolvePending = async (id: string, action: PendingResolutionAction, candidateId?: string) => {
     const current = snapshotRef.current;
     const item = current.pending.find((entry) => entry.id === id);
     if (!item) return;
-    if (
-      commitSnapshot(
-        { ...current, pending: current.pending.filter((entry) => entry.id !== id) },
-        accepted ? "pending-confirm" : "pending-dismiss",
-      )
-    ) {
-      toast.success(accepted ? `已确认：${item.targetTitle}` : `已忽略：${item.targetTitle}`);
+    const backend = backendRef.current;
+    if (!backend) {
+      toast.error("关系账本尚未就绪，请稍后重试。");
+      return;
+    }
+    if (action === "restore-managed-link") {
+      if (item.kind !== "severed-link" || !item.relationId) return;
+      let prepared: Awaited<ReturnType<typeof prepareManagedLinkWrite>> | undefined;
+      try {
+        prepared = await prepareManagedLinkWrite(
+          adapterRef.current,
+          current,
+          item.relationId,
+          item.filePath,
+          item.targetTitle,
+        );
+        const next = {
+          ...prepared.snapshot,
+          pending: prepared.snapshot.pending.filter(
+            (entry) =>
+              entry.id !== item.id &&
+              !(
+                entry.kind === "wikilink" &&
+                entry.filePath === item.filePath &&
+                entry.targetTitle === item.targetTitle
+              ),
+          ),
+        };
+        const persisted = backend.commit({
+          snapshot: next,
+          kind: "managed-link-restore",
+          sideEffects: {
+            upsertLinkSnapshots: [prepared.linkSnapshot],
+            fileWrites: [prepared.fileWrite],
+          },
+        });
+        snapshotRef.current = persisted;
+        setSnapshot(persisted);
+        toast.success(`已恢复托管链接：${item.targetTitle}`);
+      } catch (error) {
+        if (prepared) await adapterRef.current.write(prepared.fileWrite.path, prepared.fileWrite.before);
+        toast.error(`恢复链接失败：${String(error)}`);
+      }
+      return;
+    }
+    const newNodeId =
+      action === "accept" || action === "lineage-new" ? `pending-node:${crypto.randomUUID()}` : undefined;
+    const bindingNodeId = action === "lineage-rebind" ? candidateId : action === "lineage-new" ? newNodeId : undefined;
+    let lineageWrite: Awaited<ReturnType<typeof writeLineageBinding>> | undefined;
+    try {
+      if (item.kind === "lineage" && bindingNodeId) {
+        lineageWrite = await writeLineageBinding(adapterRef.current, item, bindingNodeId);
+      }
+      const applied = backend.applyOperation(
+        current,
+        createPendingResolutionOperation({
+          pendingId: id,
+          action,
+          candidateId,
+          newNodeId,
+          sourceMarkdown: lineageWrite ? markdownBody(lineageWrite.after) : undefined,
+        }),
+        lineageWrite ? { fileWrites: [lineageWrite] } : undefined,
+      );
+      if (!applied.changed) {
+        if (lineageWrite && lineageWrite.after !== lineageWrite.before) {
+          await adapterRef.current.write(lineageWrite.path, lineageWrite.before);
+        }
+        toast.warning("该待定项需要更明确的处理方式。");
+        return;
+      }
+      snapshotRef.current = applied.snapshot;
+      setSnapshot(applied.snapshot);
+      if (action === "lineage-defer") toast.message(`${item.targetTitle} 已保留在血缘候选栈。`);
+      else if (action === "dismiss") toast.success(`已忽略：${item.targetTitle}`);
+      else if (action === "lineage-rebind") toast.success(`已重新绑定来源：${item.targetTitle}`);
+      else if (action === "lineage-new") toast.success(`已建立新身份：${item.targetTitle}`);
+      else toast.success(`已采用为待定认知关系：${item.targetTitle}`);
+    } catch (error) {
+      if (lineageWrite && lineageWrite.after !== lineageWrite.before) {
+        await adapterRef.current.write(lineageWrite.path, lineageWrite.before).catch(() => undefined);
+      }
+      toast.error(`待定项处理失败：${String(error)}`);
     }
   };
 
@@ -1176,8 +1853,78 @@ export default function KnowledgeBridgeWindow({
     }
   };
 
-  const applyMigration = (preview: ReturnType<typeof buildFrozenL2MigrationPreview>) => {
-    const next = applyHighConfidenceMigration(snapshotRef.current, preview);
+  const adoptBridgeSuggestion = (nodeId: string, suggestion: BridgeSuggestion) => {
+    const current = snapshotRef.current;
+    const source = current.nodes.find(
+      (node) =>
+        node.id === nodeId && node.role === "L3" && node.status !== "missing-source" && node.status !== "frozen",
+    );
+    const bridge = current.nodes.find(
+      (node) => node.id === suggestion.bridgeId && node.role === "L2" && node.status === "formal",
+    );
+    if (!source || !bridge) {
+      toast.error("建议引用的知识节点已变化，请重新生成桥梁建议。");
+      return;
+    }
+    const duplicate = current.pending.some(
+      (item) => item.kind === "ai-bridge" && item.sourceId === source.id && item.candidates?.[0]?.id === bridge.id,
+    );
+    if (duplicate) {
+      toast.message("这条桥梁建议已经在待整理区中。");
+      return;
+    }
+    const now = Date.now();
+    const alternatives = suggestion.alternatives.flatMap((alternative, index) => {
+      const node = current.nodes.find(
+        (candidate) => candidate.id === alternative.id && candidate.role === "L2" && candidate.status === "formal",
+      );
+      return node
+        ? [
+            {
+              id: node.id,
+              title: node.title,
+              reason: alternative.reason,
+              confidence: Math.max(0, suggestion.confidence - (index + 1) * 0.1),
+            },
+          ]
+        : [];
+    });
+    const pending: PendingMention = {
+      id: `pending:ai-bridge:${crypto.randomUUID()}`,
+      filePath: `ai://${suggestion.provider}/bridge/${source.id}`,
+      sourceId: source.id,
+      targetTitle: bridge.title,
+      kind: "ai-bridge",
+      raw: suggestion.reason,
+      suggestedRole: "L2",
+      anchorId: suggestion.anchorId,
+      anchorReason: suggestion.anchorReason,
+      anchorEvidence: suggestion.anchorEvidence,
+      anchorAlternatives: suggestion.anchorAlternatives,
+      candidates: [
+        {
+          id: bridge.id,
+          title: bridge.title,
+          reason: suggestion.reason,
+          confidence: suggestion.confidence,
+        },
+        ...alternatives,
+      ],
+    };
+    const operation: KnowledgeGraphOperationMeta = {
+      id: `kb-operation:${crypto.randomUUID()}`,
+      origin: "agent",
+      type: "ai-bridge-adopt",
+      createdAt: now,
+    };
+    if (commitSnapshot({ ...current, pending: [...current.pending, pending] }, "ai-bridge-adopt", operation)) {
+      setActiveTab("pending");
+      toast.success("桥梁建议已进入待整理区，确认前不会参与正式推理。");
+    }
+  };
+
+  const applyMigration = (preview: ReturnType<typeof buildFrozenL2MigrationPreview>, pathIds: Set<string>) => {
+    const next = applyHighConfidenceMigration(snapshotRef.current, preview, pathIds);
     const applied = next.migrationRecords.at(-1)?.pathMappings.length ?? 0;
     if (commitSnapshot(next, "l2-migration")) {
       toast.success(`已迁移 ${applied} 条高置信路径；其余路径继续冻结。`);
@@ -1240,20 +1987,21 @@ export default function KnowledgeBridgeWindow({
     toast.success(`已确认旧知锚点：${title}`);
   };
 
-  const undoLastChange = () => {
+  const undoLastChange = async () => {
     const backend = backendRef.current;
     if (!backend) {
       toast.error("关系账本尚未就绪，请稍后重试。");
       return;
     }
     try {
-      const restored = backend.undo();
+      const restored = backend.undoWithSideEffects();
       if (!restored) {
         toast.message("没有可撤销的账本变更。");
         return;
       }
-      snapshotRef.current = restored;
-      setSnapshot(restored);
+      await Promise.all(restored.fileRestores.map((file) => adapterRef.current.write(file.path, file.content)));
+      snapshotRef.current = restored.snapshot;
+      setSnapshot(restored.snapshot);
       toast.success("已撤销上次账本变更，画布已同步还原。");
     } catch (error) {
       toast.error(`撤销失败：${String(error)}`);
@@ -1262,6 +2010,7 @@ export default function KnowledgeBridgeWindow({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <HoverPreviewLayer preview={hoverPreview} snapshot={snapshot} />
       <div className="border-b px-3 py-3">
         <div className="flex items-center gap-2">
           <Database className="size-4" />
@@ -1350,7 +2099,13 @@ export default function KnowledgeBridgeWindow({
             <PendingPool items={snapshot.pending} onResolve={resolvePending} />
           </TabsContent>
           <TabsContent value="bridge" className="min-h-0 overflow-y-auto p-3">
-            <BridgeSuggestions snapshot={snapshot} onFreeze={freezeBridge} onApplyMigration={applyMigration} />
+            <BridgeSuggestions
+              snapshot={snapshot}
+              connection={aiConnection}
+              onFreeze={freezeBridge}
+              onAdoptSuggestion={adoptBridgeSuggestion}
+              onApplyMigration={applyMigration}
+            />
           </TabsContent>
           <TabsContent value="evidence" className="min-h-0 overflow-y-auto p-3">
             <EvidencePanel snapshot={snapshot} onSelectLens={selectLens} />
@@ -1368,7 +2123,7 @@ export default function KnowledgeBridgeWindow({
           <Button size="sm" variant="outline" onClick={() => void switchVault()} disabled={scanning}>
             {vaultBacked ? "更换 Vault" : "连接 Vault"}
           </Button>
-          <Button size="icon" variant="ghost" title="撤销上次账本变更" onClick={undoLastChange}>
+          <Button size="icon" variant="ghost" title="撤销上次账本变更" onClick={() => void undoLastChange()}>
             <Undo2 />
           </Button>
           <Button size="icon" variant="ghost" title="AI 设置" onClick={() => setActiveTab("ai")}>

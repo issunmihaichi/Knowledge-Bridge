@@ -1,4 +1,4 @@
-import type { VaultFile } from "./model";
+import type { VaultFile, VaultFileMetadata } from "./model";
 
 export const KNOWLEDGE_BRIDGE_LEDGER_PATH = ".knowledge-bridge/graph.db";
 const RECENT_VAULT_PATH_KEY = "knowledge-bridge.recent-vault-path";
@@ -7,6 +7,7 @@ export interface VaultAdapter {
   readonly name: string;
   readonly persistence: "browser" | "vault";
   listMarkdown(signal?: AbortSignal): AsyncGenerator<VaultFile>;
+  listMarkdownMetadata(signal?: AbortSignal): AsyncGenerator<VaultFileMetadata>;
   read(path: string): Promise<string>;
   write(path: string, content: string): Promise<void>;
   readBinary(path: string): Promise<Uint8Array | undefined>;
@@ -30,11 +31,31 @@ async function* walkDirectory(directory: FileSystemDirectoryHandle, prefix = "")
   }
 }
 
-async function resolveFile(root: FileSystemDirectoryHandle, path: string, create = false): Promise<FileSystemFileHandle> {
+async function resolveFile(
+  root: FileSystemDirectoryHandle,
+  path: string,
+  create = false,
+): Promise<FileSystemFileHandle> {
   const parts = path.split("/").filter(Boolean);
   let directory = root;
   for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part, { create });
   return directory.getFileHandle(parts.at(-1)!, { create });
+}
+
+async function* walkDirectoryMetadata(
+  directory: FileSystemDirectoryHandle,
+  prefix = "",
+): AsyncGenerator<VaultFileMetadata> {
+  for await (const [name, handle] of (directory as DirectoryHandleWithEntries).entries()) {
+    if (name === ".knowledge-bridge" || name === ".obsidian") continue;
+    const path = prefix ? `${prefix}/${name}` : name;
+    if (handle.kind === "directory") {
+      yield* walkDirectoryMetadata(handle as FileSystemDirectoryHandle, path);
+    } else if (name.toLowerCase().endsWith(".md")) {
+      const file = await (handle as FileSystemFileHandle).getFile();
+      yield { path, modifiedAt: file.lastModified, size: file.size };
+    }
+  }
 }
 
 export function isTauriRuntime(): boolean {
@@ -92,8 +113,35 @@ export class TauriVaultAdapter implements VaultAdapter {
     }
   }
 
+  private async *walkMetadata(
+    directory: string,
+    prefix: string,
+    signal?: AbortSignal,
+  ): AsyncGenerator<VaultFileMetadata> {
+    const [{ readDir, stat }, { join }] = await Promise.all([
+      import("@tauri-apps/plugin-fs"),
+      import("@tauri-apps/api/path"),
+    ]);
+    for (const entry of await readDir(directory)) {
+      if (signal?.aborted) return;
+      if (entry.name === ".knowledge-bridge" || entry.name === ".obsidian") continue;
+      const path = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const absolutePath = await join(directory, entry.name);
+      if (entry.isDirectory) {
+        yield* this.walkMetadata(absolutePath, path, signal);
+      } else if (entry.isFile && entry.name.toLowerCase().endsWith(".md")) {
+        const fileInfo = await stat(absolutePath);
+        yield { path, size: fileInfo.size, modifiedAt: fileInfo.mtime?.getTime() ?? 0 };
+      }
+    }
+  }
+
   async *listMarkdown(signal?: AbortSignal): AsyncGenerator<VaultFile> {
     yield* this.walk(this.root, "", signal);
+  }
+
+  async *listMarkdownMetadata(signal?: AbortSignal): AsyncGenerator<VaultFileMetadata> {
+    yield* this.walkMetadata(this.root, "", signal);
   }
 
   async read(path: string): Promise<string> {
@@ -130,6 +178,10 @@ export class BrowserVaultAdapter implements VaultAdapter {
     if (signal?.aborted) return;
     yield* walkDirectory(this.root, "");
   }
+  async *listMarkdownMetadata(signal?: AbortSignal): AsyncGenerator<VaultFileMetadata> {
+    if (signal?.aborted) return;
+    yield* walkDirectoryMetadata(this.root, "");
+  }
   async read(path: string): Promise<string> {
     return (await (await resolveFile(this.root, path)).getFile()).text();
   }
@@ -165,10 +217,18 @@ export class DemoVaultAdapter implements VaultAdapter {
     ["Sources/肿瘤细胞状态研究.md", "---\nkb-id: paper\n---\n\n# 肿瘤细胞状态研究\n\n[[空间转录组]]"],
   ]);
   private readonly binaryFiles = new Map<string, Uint8Array>();
+  private revision = 1;
   async *listMarkdown(signal?: AbortSignal): AsyncGenerator<VaultFile> {
     for (const [path, content] of this.files) {
       if (signal?.aborted) return;
-      yield { path, content, size: content.length, modifiedAt: Date.now() };
+      yield { path, content, size: content.length, modifiedAt: this.revision };
+      await Promise.resolve();
+    }
+  }
+  async *listMarkdownMetadata(signal?: AbortSignal): AsyncGenerator<VaultFileMetadata> {
+    for (const [path, content] of this.files) {
+      if (signal?.aborted) return;
+      yield { path, size: content.length, modifiedAt: this.revision };
       await Promise.resolve();
     }
   }
@@ -177,6 +237,7 @@ export class DemoVaultAdapter implements VaultAdapter {
   }
   async write(path: string, content: string): Promise<void> {
     this.files.set(path, content);
+    this.revision += 1;
   }
   async readBinary(path: string): Promise<Uint8Array | undefined> {
     const bytes = this.binaryFiles.get(path);
@@ -194,7 +255,9 @@ export async function pickVault(): Promise<VaultAdapter> {
     if (typeof selected !== "string") throw new DOMException("已取消选择 Vault", "AbortError");
     return new TauriVaultAdapter(selected);
   }
-  const picker = (window as Window & { showDirectoryPicker?: (options?: { mode: "readwrite" }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+  const picker = (
+    window as Window & { showDirectoryPicker?: (options?: { mode: "readwrite" }) => Promise<FileSystemDirectoryHandle> }
+  ).showDirectoryPicker;
   if (!picker) throw new Error("当前浏览器不支持本地文件夹访问，请使用 Chromium 浏览器。");
   return new BrowserVaultAdapter(await picker({ mode: "readwrite" }));
 }

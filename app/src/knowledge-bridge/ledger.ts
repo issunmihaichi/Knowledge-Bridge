@@ -4,6 +4,17 @@ import type { KnowledgeGraphOperationMeta, KnowledgeRelation, ManagedLinkSnapsho
 
 const DB_KEY = "knowledge-bridge.graph.db";
 
+export interface LedgerSideEffects {
+  upsertLinkSnapshots?: ManagedLinkSnapshot[];
+  deleteLinkSnapshotIds?: string[];
+  fileWrites?: Array<{ path: string; before: string; after: string }>;
+}
+
+export interface LedgerUndoResult {
+  snapshot: VaultSnapshot;
+  fileRestores: Array<{ path: string; content: string }>;
+}
+
 export function resolveSqlWasmPath(url: string, currentDirectory: string): string {
   const decoded = decodeURIComponent(url);
   if (decoded.startsWith("/@fs/")) return decoded.slice("/@fs/".length);
@@ -132,9 +143,24 @@ export class GraphLedger {
     });
   }
 
-  save(snapshot: VaultSnapshot, kind = "graph-save", operation?: KnowledgeGraphOperationMeta) {
+  save(
+    snapshot: VaultSnapshot,
+    kind = "graph-save",
+    operation?: KnowledgeGraphOperationMeta,
+    sideEffects: LedgerSideEffects = {},
+  ) {
     const before = this.load();
     snapshot = normalizeSnapshot(snapshot);
+    const affectedLinkIds = [
+      ...new Set([
+        ...(sideEffects.deleteLinkSnapshotIds ?? []),
+        ...(sideEffects.upsertLinkSnapshots ?? []).map((item) => item.edgeId),
+      ]),
+    ];
+    const linkSnapshotsBefore = affectedLinkIds.map((edgeId) => ({
+      edgeId,
+      snapshot: this.getSnapshot(edgeId) ?? null,
+    }));
     this.db.run("BEGIN");
     try {
       this.db.run(
@@ -158,9 +184,29 @@ export class GraphLedger {
         this.db.run("INSERT INTO paper_drafts VALUES (?, ?)", [draft.id, JSON.stringify(draft)]);
       for (const proposal of snapshot.graphProposals)
         this.db.run("INSERT INTO graph_proposals VALUES (?, ?)", [proposal.id, JSON.stringify(proposal)]);
+      for (const edgeId of sideEffects.deleteLinkSnapshotIds ?? []) {
+        this.db.run("DELETE FROM link_snapshots WHERE edge_id = ?", [edgeId]);
+      }
+      for (const linkSnapshot of sideEffects.upsertLinkSnapshots ?? []) {
+        this.db.run("INSERT OR REPLACE INTO link_snapshots VALUES (?, ?)", [
+          linkSnapshot.edgeId,
+          JSON.stringify(linkSnapshot),
+        ]);
+      }
+      const linkSnapshotsAfter = affectedLinkIds.map((edgeId) => ({
+        edgeId,
+        snapshot: this.getSnapshot(edgeId) ?? null,
+      }));
       this.db.run("INSERT INTO transactions(kind, payload, created_at) VALUES (?, ?, ?)", [
         kind,
-        JSON.stringify({ before, after: snapshot, operation }),
+        JSON.stringify({
+          before,
+          after: snapshot,
+          operation,
+          linkSnapshotsBefore,
+          linkSnapshotsAfter,
+          fileWrites: sideEffects.fileWrites ?? [],
+        }),
         Date.now(),
       ]);
       this.db.run("COMMIT");
@@ -186,17 +232,55 @@ export class GraphLedger {
     return value;
   }
 
-  undo(): VaultSnapshot | undefined {
+  listSnapshots(): ManagedLinkSnapshot[] {
+    return rows<{ payload: string }>(this.db, "SELECT payload FROM link_snapshots ORDER BY edge_id").map((row) =>
+      JSON.parse(row.payload),
+    );
+  }
+
+  getMetadata<T>(key: string): T | undefined {
+    const statement = this.db.prepare("SELECT value FROM metadata WHERE key = ?");
+    statement.bind([key]);
+    const value = statement.step() ? (JSON.parse(String(statement.getAsObject().value)) as T) : undefined;
+    statement.free();
+    return value;
+  }
+
+  /** Rebuildable cache metadata is persisted without creating an undo version. */
+  setMetadata<T>(key: string, value: T): void {
+    this.db.run("INSERT OR REPLACE INTO metadata VALUES (?, ?)", [key, JSON.stringify(value)]);
+    this.flush();
+  }
+
+  undoWithSideEffects(): LedgerUndoResult | undefined {
     const transaction = rows<{ id: number; payload: string }>(
       this.db,
       "SELECT id, payload FROM transactions WHERE undone_at IS NULL ORDER BY id DESC LIMIT 1",
     )[0];
     if (!transaction) return undefined;
-    const before = normalizeSnapshot(JSON.parse(transaction.payload).before as VaultSnapshot);
+    const payload = JSON.parse(transaction.payload) as {
+      before: VaultSnapshot;
+      linkSnapshotsBefore?: Array<{ edgeId: string; snapshot: ManagedLinkSnapshot | null }>;
+      fileWrites?: Array<{ path: string; before: string; after: string }>;
+    };
+    const before = normalizeSnapshot(payload.before);
     this.db.run("UPDATE transactions SET undone_at = ? WHERE id = ?", [Date.now(), transaction.id]);
     this.replace(before);
+    for (const record of payload.linkSnapshotsBefore ?? []) {
+      this.db.run("DELETE FROM link_snapshots WHERE edge_id = ?", [record.edgeId]);
+      if (record.snapshot) {
+        this.db.run("INSERT INTO link_snapshots VALUES (?, ?)", [record.edgeId, JSON.stringify(record.snapshot)]);
+      }
+    }
     this.flush();
-    return before;
+    return {
+      snapshot: before,
+      fileRestores: (payload.fileWrites ?? []).map((write) => ({ path: write.path, content: write.before })),
+    };
+  }
+
+  undo(): VaultSnapshot | undefined {
+    return this.undoWithSideEffects()?.snapshot;
   }
 
   exportBytes() {

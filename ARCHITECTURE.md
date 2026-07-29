@@ -74,7 +74,35 @@ history.
 Every mutation has an operation record with an ID, origin, type, and timestamp.
 The origins are `user`, `canvas`, `agent`, `mcp`, and `skill`. The transaction
 stores the graph before and after the mutation, so undo restores the exact prior
-snapshot rather than attempting a heuristic reversal.
+snapshot rather than attempting a heuristic reversal. Transactions that write
+Markdown also record the before/after body and managed-link snapshot, so undo
+restores both the SQLite ledger and the source file.
+
+### Three-stage startup and indexing
+
+Startup first reads only the confirmed graph and last saved layout from
+`graph.db`; it does not parse the Vault body or run layout. Large graphs use a
+spatial bucket index so only nodes near the current viewport are initially
+materialized.
+
+The background index enumerates Markdown metadata before reading content. Its
+`markdown-index-v1` cache reuses files whose path, modification time, and size
+are unchanged. Changed bodies are read concurrently and parsed in a Web Worker
+for large batches, with a cooperative main-thread fallback. All newly found
+links and unbound sources remain in the Pending Pool until the user acts.
+
+### Managed Markdown synchronization
+
+Managed links carry a stable edge marker and a ledger snapshot. A scan compares
+the observed body to the last KB write hash: self-write receipts are ignored,
+user deletion severs the edge, retargeting moves the old edge to history, and a
+marker-only deletion turns the remaining wikilink into an ordinary pending
+cognitive mention. A severed edge can only be written back by the explicit
+`managed-link-restore` transaction.
+
+Files that lose `kb-id` and cannot be matched reliably are never rebound or
+duplicated automatically. Explainable lineage candidates stay pending while
+the old node becomes `missing-source` and leaves formal reasoning.
 
 ### Canvas mapping rules
 
@@ -88,6 +116,9 @@ snapshot rather than attempting a heuristic reversal.
   is saved, an unrelated ledger refresh cannot overwrite the on-canvas position.
 - Semantic zoom only controls render visibility. It must not write coordinates
   or run a force simulation.
+- Node detail edits reuse one Project Graph editor instance and become typed
+  `set-node-details` operations. Bound Markdown writes share the same undoable
+  transaction as the ledger update.
 
 ## Knowledge-model guards
 

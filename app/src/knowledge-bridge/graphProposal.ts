@@ -18,6 +18,14 @@ const roleByStep: Record<PaperBridgeStep["role"], LearningRole> = {
 
 const defaultX: Record<LearningRole, number> = { L1: -360, L2: -80, L3: 220, L4: 460 };
 
+function reusableStepNode(step: PaperBridgeStep, node: KnowledgeNode | undefined): boolean {
+  if (!node || node.status === "frozen" || node.status === "missing-source") return false;
+  const expectedRole = roleByStep[step.role];
+  if (node.role !== expectedRole) return false;
+  if (expectedRole === "L2" && node.status !== "formal") return false;
+  return expectedRole !== "L1" || node.sourceKind !== "denied";
+}
+
 function fallbackTrace(draft: PaperBridgeDraft, now: number): AgentExecutionTrace {
   return {
     id: `agent-trace:${crypto.randomUUID()}`,
@@ -81,7 +89,8 @@ export function createGraphChangeProposal(
   let createdNodeCount = 0;
 
   for (const step of draft.chain) {
-    if (step.nodeId && knownNodes.has(step.nodeId)) {
+    const existing = step.nodeId ? snapshot.nodes.find((node) => node.id === step.nodeId) : undefined;
+    if (step.nodeId && knownNodes.has(step.nodeId) && reusableStepNode(step, existing)) {
       nodeIds.push(step.nodeId);
       continue;
     }

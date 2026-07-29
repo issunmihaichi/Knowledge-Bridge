@@ -51,7 +51,13 @@ function titleFromInput(input: string): string {
 function findAnchor(snapshot: VaultSnapshot, input: string): KnowledgeNode | undefined {
   const normalized = input.toLocaleLowerCase();
   return snapshot.nodes
-    .filter((node) => node.role === "L1" && node.sourceKind !== "denied")
+    .filter(
+      (node) =>
+        node.role === "L1" &&
+        node.status !== "missing-source" &&
+        node.status !== "frozen" &&
+        node.sourceKind !== "denied",
+    )
     .map((node) => {
       const terms = `${node.title} ${node.content}`.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [];
       const overlap = terms.filter((term) => normalized.includes(term)).length;
@@ -76,8 +82,22 @@ function findBridge(snapshot: VaultSnapshot, input: string): KnowledgeNode | und
 
 function findFrontierConcept(snapshot: VaultSnapshot, input: string): KnowledgeNode | undefined {
   return snapshot.nodes.find(
-    (node) => node.role === "L3" && input.toLocaleLowerCase().includes(node.title.toLocaleLowerCase()),
+    (node) =>
+      node.role === "L3" &&
+      node.status !== "frozen" &&
+      node.status !== "missing-source" &&
+      input.toLocaleLowerCase().includes(node.title.toLocaleLowerCase()),
   );
+}
+
+function eligibleNodeForStep(node: KnowledgeNode, role: PaperBridgeStep["role"]): boolean {
+  if (node.status === "frozen" || node.status === "missing-source") return false;
+  if (role === "bridge-mechanism") return node.role === "L2" && node.status === "formal";
+  if (role === "frontier-concept") return node.role === "L3";
+  if (role === "learning-anchor" || role === "high-school-anchor") {
+    return node.role === "L1" && node.sourceKind !== "denied";
+  }
+  return node.role === "L4";
 }
 
 export function draftPaperBridgeLocally(
@@ -193,13 +213,14 @@ function normalizeRemoteDraft(
   const chain = parsed.chain.slice(0, 5).flatMap((raw, index) => {
     if (!raw || typeof raw !== "object") return [];
     const item = raw as Partial<PaperBridgeStep>;
-    const known = item.nodeId ? knownNodes.get(item.nodeId) : undefined;
     const role = item.role;
     if (
       !role ||
       !["frontier-concept", "bridge-mechanism", "learning-anchor", "high-school-anchor", "scale-gap"].includes(role)
     )
       return [];
+    const candidate = item.nodeId ? knownNodes.get(item.nodeId) : undefined;
+    const known = candidate && eligibleNodeForStep(candidate, role) ? candidate : undefined;
     return [
       {
         id: item.id?.trim() || `remote-${index}`,
@@ -213,7 +234,7 @@ function normalizeRemoteDraft(
   });
   const requiredRoles = ["frontier-concept", "bridge-mechanism", "learning-anchor"] as const;
   if (!requiredRoles.every((role) => chain.some((step) => step.role === role))) return undefined;
-  const mustUseAuditedAnchor = snapshot.nodes.some((node) => node.role === "L1" && node.sourceKind !== "denied");
+  const mustUseAuditedAnchor = snapshot.nodes.some((node) => eligibleNodeForStep(node, "learning-anchor"));
   if (mustUseAuditedAnchor && !chain.some((step) => step.role === "learning-anchor" && step.nodeId)) return undefined;
   const order: PaperBridgeStep["role"][] = ["frontier-concept", "scale-gap", "bridge-mechanism", "learning-anchor"];
   const orderedChain = order.flatMap((role) => chain.filter((step) => step.role === role));
@@ -246,7 +267,14 @@ export async function draftPaperBridge(
   if (!connection.endpoint) return draftPaperBridgeLocally(trimmed, snapshot, now);
 
   const candidates = snapshot.nodes
-    .filter((node) => node.role === "L1" || node.role === "L2" || node.role === "L3")
+    .filter(
+      (node) =>
+        (node.role === "L1" || node.role === "L2" || node.role === "L3") &&
+        node.status !== "frozen" &&
+        node.status !== "missing-source" &&
+        (node.role !== "L2" || node.status === "formal") &&
+        (node.role !== "L1" || node.sourceKind !== "denied"),
+    )
     .map(({ id, title, role, content, sourceKind, definition, boundary }) => ({
       id,
       title,

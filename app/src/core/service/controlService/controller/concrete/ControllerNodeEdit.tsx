@@ -121,8 +121,8 @@ export class ControllerNodeEditClass extends ControllerClass {
     this.project.controller.resetCountdownTimer();
     const location = this.project.renderer.transformView2World(new Vector(event.clientX, event.clientY));
     for (const node of this.project.stageManager.getTextNodes()) {
-      // Knowledge Bridge secondary relations must remain expandable even when
-      // normal node details are configured to stay visible.
+      // KB-managed nodes still need hover state for native details and previews
+      // when ordinary node detail labels are configured to stay visible.
       const tracksHover = !Settings.alwaysShowDetails || node.uuid.startsWith("kb:node:");
       node.isMouseHover = tracksHover && node.collisionBox.isContainsPoint(location);
     }

@@ -12,7 +12,14 @@ export type LogicalRelationKind = "structure" | "causality" | "temporal";
  * replace its structural, causal, or temporal meaning.
  */
 export type ReasoningRelationKind = "argument" | "cross-scale";
-export type CognitiveRelationKind = "prerequisite" | "analogy" | "translation" | "explanation" | "comparison";
+export type CognitiveRelationKind =
+  | "prerequisite"
+  | "analogy"
+  | "translation"
+  | "explanation"
+  | "comparison"
+  | "mention"
+  | "related";
 export type LogicalRelationOutcome = "compatible" | "conditional" | "conflicting";
 export type ArgumentRole = "source" | "premise" | "evidence" | "intermediate-conclusion" | "conclusion";
 
@@ -41,6 +48,8 @@ export interface KnowledgeNode {
   status: NodeStatus;
   path?: string;
   content: string;
+  /** Canonical long-form editor value after the user edits generated details. */
+  detailsMarkdown?: string;
   x: number;
   y: number;
   sourceKind?: "user-confirmed" | "behavior" | "ai-inferred" | "denied";
@@ -84,12 +93,18 @@ export interface KnowledgeRelation {
   layer: RelationLayer;
   status: RelationStatus;
   managed?: boolean;
+  managedFilePath?: string;
+  managedTarget?: string;
   context?: string;
+  /** Stable identity shared by the two edges of one concrete L1-L2-L3 bridge path. */
+  bridgePathId?: string;
   confidence?: number;
   evidence?: EvidenceReading[];
   scaleProtocolId?: string;
   kind?: LogicalRelationKind;
   reasoningKind?: ReasoningRelationKind;
+  /** A strong cross-scale claim requires a confirmed conversion protocol. */
+  crossScaleStrength?: "strong" | "observation";
   cognitiveKind?: CognitiveRelationKind;
   /** Explicit display priority. The strongest relation in a bundle is rendered as its primary edge. */
   weight?: number;
@@ -101,15 +116,28 @@ export interface PendingMention {
   id: string;
   filePath: string;
   sourceId?: string;
+  relationId?: string;
   targetTitle: string;
-  kind: "wikilink" | "orphan" | "lineage" | "ai-bridge";
+  kind: "wikilink" | "orphan" | "lineage" | "ai-bridge" | "scale-gap" | "severed-link";
   raw: string;
+  suggestedRole?: LearningRole;
+  deferredAt?: number;
+  anchorId?: string;
+  anchorReason?: string;
+  anchorEvidence?: string[];
+  anchorAlternatives?: Array<{ id: string; reason: string; confidence: number }>;
   candidates?: Array<{ id: string; title: string; reason: string; confidence: number }>;
 }
 
 export interface VaultFile {
   path: string;
   content: string;
+  modifiedAt: number;
+  size: number;
+}
+
+export interface VaultFileMetadata {
+  path: string;
   modifiedAt: number;
   size: number;
 }
@@ -432,6 +460,7 @@ export const demoVaultSnapshot: VaultSnapshot = {
       scaleProtocolId: "protocol-molecule-person",
       kind: "causality",
       reasoningKind: "cross-scale",
+      crossScaleStrength: "strong",
     },
     {
       id: "edge-evidence",

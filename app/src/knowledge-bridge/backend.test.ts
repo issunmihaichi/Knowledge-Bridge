@@ -53,4 +53,39 @@ describe("Knowledge Bridge backend facade", () => {
       }),
     );
   });
+
+  it("does not let ordinary commits revive a severed managed edge", async () => {
+    const ledger = await GraphLedger.open(undefined, undefined, false);
+    const backend = new LocalKnowledgeBridgeBackend(ledger);
+    const initial = structuredClone(demoVaultSnapshot);
+    initial.relations[0].status = "severed";
+    backend.commit({ snapshot: initial, kind: "user-severed" });
+
+    const attempted = structuredClone(initial);
+    attempted.relations[0].status = "formal";
+    expect(backend.commit({ snapshot: attempted, kind: "agent-refresh" }).relations[0].status).toBe("severed");
+    expect(backend.commit({ snapshot: attempted, kind: "managed-link-restore" }).relations[0].status).toBe("formal");
+  });
+
+  it("does not let any commit attach a visible relation to a frozen L2", async () => {
+    const ledger = await GraphLedger.open(undefined, undefined, false);
+    const backend = new LocalKnowledgeBridgeBackend(ledger);
+    const initial = structuredClone(demoVaultSnapshot);
+    const bridge = initial.nodes.find((node) => node.role === "L2")!;
+    bridge.status = "frozen";
+    backend.commit({ snapshot: initial, kind: "freeze" });
+
+    const attempted = structuredClone(ledger.load());
+    attempted.relations.push({
+      id: "agent-late-link",
+      source: bridge.id,
+      target: "l3-crispr",
+      label: "AI 草拟",
+      layer: "cognitive",
+      cognitiveKind: "explanation",
+      status: "pending",
+    });
+    const persisted = backend.commit({ snapshot: attempted, kind: "agent-refresh" });
+    expect(persisted.relations.find((relation) => relation.id === "agent-late-link")?.status).toBe("frozen");
+  });
 });

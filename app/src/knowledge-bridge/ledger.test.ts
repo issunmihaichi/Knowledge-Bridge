@@ -56,4 +56,19 @@ describe("Knowledge Bridge graph ledger", () => {
     expect(ledger.load()).toEqual(initial);
     expect(persisted.length).toBeGreaterThan(0);
   });
+
+  it("returns Markdown file restoration data with an undone editor transaction", async () => {
+    const ledger = await GraphLedger.open(undefined, undefined, false);
+    const initial = structuredClone(demoVaultSnapshot);
+    const changed = structuredClone(initial);
+    changed.nodes[0].detailsMarkdown = "# Edited";
+    ledger.save(initial, "initial");
+    ledger.save(changed, "node-details", undefined, {
+      fileWrites: [{ path: "Notes/cell.md", before: "# Before", after: "# Edited" }],
+    });
+    expect(ledger.undoWithSideEffects()).toEqual({
+      snapshot: initial,
+      fileRestores: [{ path: "Notes/cell.md", content: "# Before" }],
+    });
+  });
 });

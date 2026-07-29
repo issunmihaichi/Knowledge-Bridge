@@ -1,10 +1,16 @@
 import { applyGraphChangeProposal, createGraphChangeProposal } from "./graphProposal";
+import { applyPendingResolution, type PendingResolution } from "./pending";
 import type { KnowledgeGraphOperationMeta, PaperBridgeDraft, VaultSnapshot } from "./model";
 
 export interface KnowledgeNodePosition {
   id: string;
   x: number;
   y: number;
+}
+
+export interface KnowledgeNodeDetails {
+  id: string;
+  markdown: string;
 }
 
 export interface ApplyAgentProposalOperation extends KnowledgeGraphOperationMeta {
@@ -19,7 +25,22 @@ export interface SetCanvasPositionsOperation extends KnowledgeGraphOperationMeta
   positions: KnowledgeNodePosition[];
 }
 
-export type KnowledgeGraphOperation = ApplyAgentProposalOperation | SetCanvasPositionsOperation;
+export interface SetNodeDetailsOperation extends KnowledgeGraphOperationMeta {
+  type: "set-node-details";
+  origin: "canvas";
+  details: KnowledgeNodeDetails[];
+}
+
+export interface ResolvePendingOperation extends KnowledgeGraphOperationMeta, PendingResolution {
+  type: "pending-resolve";
+  origin: "user";
+}
+
+export type KnowledgeGraphOperation =
+  | ApplyAgentProposalOperation
+  | SetCanvasPositionsOperation
+  | SetNodeDetailsOperation
+  | ResolvePendingOperation;
 
 export interface AppliedKnowledgeGraphOperation {
   snapshot: VaultSnapshot;
@@ -73,6 +94,18 @@ function applyCanvasPositions(snapshot: VaultSnapshot, positions: KnowledgeNodeP
   return changed ? { ...snapshot, nodes } : snapshot;
 }
 
+function applyNodeDetails(snapshot: VaultSnapshot, details: KnowledgeNodeDetails[]): VaultSnapshot {
+  const values = new Map(details.map((item) => [item.id, item.markdown]));
+  let changed = false;
+  const nodes = snapshot.nodes.map((node) => {
+    const markdown = values.get(node.id);
+    if (markdown === undefined || node.detailsMarkdown === markdown) return node;
+    changed = true;
+    return { ...node, detailsMarkdown: markdown };
+  });
+  return changed ? { ...snapshot, nodes } : snapshot;
+}
+
 export function applyKnowledgeGraphOperation(
   snapshot: VaultSnapshot,
   operation: KnowledgeGraphOperation,
@@ -80,7 +113,11 @@ export function applyKnowledgeGraphOperation(
   const next =
     operation.type === "agent-proposal-apply"
       ? applyAgentProposal(snapshot, operation)
-      : applyCanvasPositions(snapshot, operation.positions);
+      : operation.type === "set-canvas-positions"
+        ? applyCanvasPositions(snapshot, operation.positions)
+        : operation.type === "set-node-details"
+          ? applyNodeDetails(snapshot, operation.details)
+          : applyPendingResolution(snapshot, operation);
   return {
     snapshot: next,
     changed: next !== snapshot,
@@ -119,5 +156,33 @@ export function createCanvasPositionOperation(
     type: "set-canvas-positions",
     positions,
     createdAt: now,
+  };
+}
+
+export function createNodeDetailsOperation(details: KnowledgeNodeDetails[], now = Date.now()): SetNodeDetailsOperation {
+  return {
+    id: `kb-operation:${crypto.randomUUID()}`,
+    origin: "canvas",
+    type: "set-node-details",
+    details,
+    createdAt: now,
+  };
+}
+
+export function createPendingResolutionOperation(
+  resolution: Omit<PendingResolution, "now"> & { now?: number },
+): ResolvePendingOperation {
+  const now = resolution.now ?? Date.now();
+  return {
+    id: `kb-operation:${crypto.randomUUID()}`,
+    origin: "user",
+    type: "pending-resolve",
+    createdAt: now,
+    now,
+    pendingId: resolution.pendingId,
+    action: resolution.action,
+    candidateId: resolution.candidateId,
+    newNodeId: resolution.newNodeId,
+    sourceMarkdown: resolution.sourceMarkdown,
   };
 }

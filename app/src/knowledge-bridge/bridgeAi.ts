@@ -17,7 +17,13 @@ function localSuggestion(selected: KnowledgeNode, nodes: KnowledgeNode[]): Bridg
   const candidates = nodes.filter((node) => node.role === "L2" && node.status === "formal");
   if (!candidates.length) return undefined;
   const anchors = nodes
-    .filter((node) => node.role === "L1" && node.sourceKind !== "denied")
+    .filter(
+      (node) =>
+        node.role === "L1" &&
+        node.status !== "missing-source" &&
+        node.status !== "frozen" &&
+        node.sourceKind !== "denied",
+    )
     .map((node) => {
       const entry = node.anchorLedger?.at(-1);
       const sourceScore = entry?.source === "user-confirmed" ? 0.22 : entry?.source === "behavior" ? 0.14 : 0.06;
@@ -69,7 +75,13 @@ export async function suggestBridge(
         boundary,
       }));
     const anchors = nodes
-      .filter((node) => node.role === "L1" && node.sourceKind !== "denied")
+      .filter(
+        (node) =>
+          node.role === "L1" &&
+          node.status !== "missing-source" &&
+          node.status !== "frozen" &&
+          node.sourceKind !== "denied",
+      )
       .map(({ id, title, anchorLedger }) => ({ id, title, anchorLedger }));
     const response = await fetch(`${connection.endpoint}/chat/completions`, {
       method: "POST",
@@ -93,11 +105,38 @@ export async function suggestBridge(
       throw new Error("AI returned an unknown bridge");
     if (parsed.anchorId && !anchors.some((anchor) => anchor.id === parsed.anchorId))
       throw new Error("AI returned an unknown anchor");
+    const alternativeIds = new Set(candidates.map((candidate) => candidate.id));
+    const anchorIds = new Set(anchors.map((anchor) => anchor.id));
     return {
-      ...parsed,
-      anchorReason: parsed.anchorReason ?? "AI 未提供锚点理由",
-      anchorEvidence: parsed.anchorEvidence ?? [],
-      anchorAlternatives: parsed.anchorAlternatives ?? [],
+      bridgeId: parsed.bridgeId,
+      reason: typeof parsed.reason === "string" ? parsed.reason : "AI 未提供桥梁理由。",
+      confidence: typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
+      alternatives: Array.isArray(parsed.alternatives)
+        ? parsed.alternatives
+            .filter((item: unknown) => item && typeof item === "object")
+            .map((item: { id?: unknown; reason?: unknown }) => ({
+              id: typeof item.id === "string" ? item.id : "",
+              reason: typeof item.reason === "string" ? item.reason : "AI 未提供理由。",
+            }))
+            .filter((item: { id: string }) => alternativeIds.has(item.id) && item.id !== parsed.bridgeId)
+            .slice(0, 3)
+        : [],
+      anchorId: typeof parsed.anchorId === "string" && anchorIds.has(parsed.anchorId) ? parsed.anchorId : undefined,
+      anchorReason: typeof parsed.anchorReason === "string" ? parsed.anchorReason : "AI 未提供锚点理由",
+      anchorEvidence: Array.isArray(parsed.anchorEvidence)
+        ? parsed.anchorEvidence.filter((item: unknown): item is string => typeof item === "string").slice(0, 5)
+        : [],
+      anchorAlternatives: Array.isArray(parsed.anchorAlternatives)
+        ? parsed.anchorAlternatives
+            .filter((item: unknown) => item && typeof item === "object")
+            .map((item: { id?: unknown; reason?: unknown; confidence?: unknown }) => ({
+              id: typeof item.id === "string" ? item.id : "",
+              reason: typeof item.reason === "string" ? item.reason : "AI 未提供理由。",
+              confidence: typeof item.confidence === "number" ? Math.max(0, Math.min(1, item.confidence)) : 0.5,
+            }))
+            .filter((item: { id: string }) => anchorIds.has(item.id) && item.id !== parsed.anchorId)
+            .slice(0, 3)
+        : [],
       provider: "remote-ai",
     };
   } catch {

@@ -4,6 +4,8 @@ import {
   applyHighConfidenceMigration,
   buildFrozenL2MigrationPreview,
   bundleRelations,
+  enforceCrossScaleGovernance,
+  enforceFrozenL2Governance,
   evaluateL2Admission,
   freezeL2,
   normalizeCrossScaleRelation,
@@ -61,14 +63,78 @@ function snapshot(): VaultSnapshot {
       },
     ],
     relations: [
-      { id: "a-old", source: "l1-a", target: "old-l2", label: "解释", layer: "logical", status: "formal" },
-      { id: "b-old", source: "l1-b", target: "old-l2", label: "解释", layer: "logical", status: "formal" },
-      { id: "old-a", source: "old-l2", target: "l3-a", label: "桥接", layer: "logical", status: "formal" },
-      { id: "old-b", source: "old-l2", target: "l3-b", label: "桥接", layer: "logical", status: "formal" },
-      { id: "a-new", source: "l1-a", target: "new-l2", label: "解释", layer: "logical", status: "formal" },
-      { id: "b-new", source: "l1-b", target: "new-l2", label: "解释", layer: "logical", status: "formal" },
-      { id: "new-a", source: "new-l2", target: "l3-a", label: "桥接", layer: "logical", status: "formal" },
-      { id: "new-b", source: "new-l2", target: "l3-b", label: "桥接", layer: "logical", status: "formal" },
+      {
+        id: "a-old",
+        source: "l1-a",
+        target: "old-l2",
+        label: "解释",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "path-a",
+      },
+      {
+        id: "b-old",
+        source: "l1-b",
+        target: "old-l2",
+        label: "解释",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "path-b",
+      },
+      {
+        id: "old-a",
+        source: "old-l2",
+        target: "l3-a",
+        label: "桥接",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "path-a",
+      },
+      {
+        id: "old-b",
+        source: "old-l2",
+        target: "l3-b",
+        label: "桥接",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "path-b",
+      },
+      {
+        id: "a-new",
+        source: "l1-a",
+        target: "new-l2",
+        label: "解释",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "new-path-a",
+      },
+      {
+        id: "b-new",
+        source: "l1-b",
+        target: "new-l2",
+        label: "解释",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "new-path-b",
+      },
+      {
+        id: "new-a",
+        source: "new-l2",
+        target: "l3-a",
+        label: "桥接",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "new-path-a",
+      },
+      {
+        id: "new-b",
+        source: "new-l2",
+        target: "l3-b",
+        label: "桥接",
+        layer: "logical",
+        status: "formal",
+        bridgePathId: "new-path-b",
+      },
       {
         id: "ai-draft",
         source: "l1-a",
@@ -99,7 +165,7 @@ describe("knowledge governance", () => {
 
   it("evaluates L2 admission without promoting it", () => {
     const report = evaluateL2Admission(snapshot(), "old-l2");
-    expect(report.independentPathCount).toBe(4);
+    expect(report.independentPathCount).toBe(2);
     expect(report.qualified).toBe(true);
     expect(snapshot().nodes.find((item) => item.id === "old-l2")?.status).toBe("formal");
   });
@@ -114,11 +180,33 @@ describe("knowledge governance", () => {
     ).toBe(true);
 
     const preview = buildFrozenL2MigrationPreview(frozen, "old-l2", 10);
-    expect(preview.paths).toHaveLength(4);
+    expect(preview.paths).toHaveLength(2);
     expect(preview.paths.every((item) => item.candidates[0]?.l2Id === "new-l2")).toBe(true);
     const migrated = applyHighConfidenceMigration(frozen, preview, undefined, 11);
-    expect(migrated.migrationRecords[0]?.pathMappings).toHaveLength(4);
+    expect(migrated.migrationRecords[0]?.pathMappings).toHaveLength(2);
     expect(migrated.relations.filter((item) => item.status === "frozen")).toHaveLength(4);
+  });
+
+  it("keeps every existing or newly proposed connection to a frozen L2 hidden", () => {
+    const frozen = freezeL2(snapshot(), "old-l2");
+    frozen.relations.push({
+      id: "late-cognitive",
+      source: "old-l2",
+      target: "l3-a",
+      label: "迟到的 AI 草稿",
+      layer: "cognitive",
+      status: "pending",
+      cognitiveKind: "explanation",
+    });
+    const governed = enforceFrozenL2Governance(frozen);
+    expect(
+      governed.relations
+        .filter((relation) => relation.source === "old-l2" || relation.target === "old-l2")
+        .every((relation) => relation.status === "frozen"),
+    ).toBe(true);
+    expect(relationBundles(governed).some((bundle) => bundle.source === "old-l2" || bundle.target === "old-l2")).toBe(
+      false,
+    );
   });
 
   it("keeps contradictory logical relations in a single visible bundle", () => {
@@ -158,12 +246,12 @@ describe("knowledge governance", () => {
     const bundle = bundleRelations(value, "l1-a", "l3-a");
     expect(bundle.label).toBe("冲突 ×3");
     expect(bundle.cognitiveCount).toBe(1);
+    expect(bundle.hiddenCognitiveCount).toBe(1);
     expect(bundle.primary?.id).toBe("conflict-b");
-    expect(bundle.secondary.map((relation) => relation.id)).toContain("cognitive");
     expect(relationBundles(value)).toContainEqual(expect.objectContaining({ source: "l1-a", target: "l3-a" }));
   });
 
-  it("keeps a high-weight cognitive relation visible even beside logical relations", () => {
+  it("hides a high-weight cognitive relation beside logical meaning", () => {
     const value = snapshot();
     value.relations.push(
       {
@@ -188,8 +276,39 @@ describe("knowledge governance", () => {
       },
     );
     const bundle = bundleRelations(value, "l1-a", "l3-b");
-    expect(bundle.primary?.id).toBe("cognitive-primary");
-    expect(bundle.secondary.map((relation) => relation.id)).toContain("logical");
+    expect(bundle.primary?.id).toBe("logical");
+    expect(bundle.hiddenCognitiveCount).toBe(1);
+    expect(bundle.label).toBeUndefined();
+  });
+
+  it("shows one dashed candidate for a cognitive-only node pair", () => {
+    const value = snapshot();
+    value.relations.push(
+      {
+        id: "analogy",
+        source: "l1-b",
+        target: "l3-a",
+        label: "类比",
+        layer: "cognitive",
+        status: "formal",
+        cognitiveKind: "analogy",
+        weight: 0.5,
+      },
+      {
+        id: "translation",
+        source: "l1-b",
+        target: "l3-a",
+        label: "翻译",
+        layer: "cognitive",
+        status: "formal",
+        cognitiveKind: "translation",
+        weight: 0.4,
+      },
+    );
+    const bundle = bundleRelations(value, "l1-b", "l3-a");
+    expect(bundle.primary?.id).toBe("analogy");
+    expect(bundle.hiddenCognitiveCount).toBe(1);
+    expect(bundle.logical).toHaveLength(0);
   });
 
   it("downgrades an incomplete cross-scale relation without changing its logical kind", () => {
@@ -210,6 +329,42 @@ describe("knowledge governance", () => {
     expect(relation.kind).toBe("causality");
     expect(relation.reasoningKind).toBe("cross-scale");
     expect(relation.status).toBe("pending");
+    expect(relation.crossScaleStrength).toBe("observation");
+  });
+
+  it("creates a scale-gap task for an incomplete strong relation", () => {
+    const value = snapshot();
+    value.relations.push({
+      id: "scale-task",
+      source: "l1-a",
+      target: "l3-a",
+      label: "分子事件导致个体表型",
+      layer: "logical",
+      status: "formal",
+      kind: "causality",
+      reasoningKind: "cross-scale",
+      scaleProtocolId: "gap",
+    });
+    const governed = enforceCrossScaleGovernance(value);
+    expect(governed.relations.find((relation) => relation.id === "scale-task")).toEqual(
+      expect.objectContaining({ status: "pending", crossScaleStrength: "observation" }),
+    );
+    expect(governed.pending).toContainEqual(expect.objectContaining({ id: "scale-gap:scale-task", kind: "scale-gap" }));
+  });
+
+  it("does not create active scale-gap work for a frozen historical relation", () => {
+    const value = snapshot();
+    value.relations.push({
+      id: "frozen-scale",
+      source: "old-l2",
+      target: "l3-a",
+      label: "历史跨尺度关系",
+      layer: "logical",
+      status: "frozen",
+      kind: "causality",
+      reasoningKind: "cross-scale",
+    });
+    expect(enforceCrossScaleGovernance(value).pending.some((item) => item.id === "scale-gap:frozen-scale")).toBe(false);
   });
 
   it("keeps an unbridged L3 as an explicit lifecycle state", () => {

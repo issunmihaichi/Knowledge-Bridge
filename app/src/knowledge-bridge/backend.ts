@@ -1,6 +1,7 @@
 import { runApprovedKnowledgeBridgeTools, runKnowledgeBridgeAgent } from "./agentRuntime";
 import type { AiConnectionSettings } from "./aiSettings";
-import { GraphLedger } from "./ledger";
+import { enforceCrossScaleGovernance, enforceFrozenL2Governance } from "./governance";
+import { GraphLedger, type LedgerSideEffects, type LedgerUndoResult } from "./ledger";
 import {
   applyKnowledgeGraphOperation,
   type AppliedKnowledgeGraphOperation,
@@ -12,6 +13,7 @@ export interface KnowledgeBridgeCommit {
   snapshot: VaultSnapshot;
   kind: string;
   operation?: KnowledgeGraphOperationMeta;
+  sideEffects?: LedgerSideEffects;
 }
 
 /**
@@ -38,8 +40,13 @@ export interface KnowledgeBridgeBackend {
   /** Persist a user-visible ledger change as one undoable version. */
   commit(change: KnowledgeBridgeCommit): VaultSnapshot;
   /** Apply and persist a typed Agent/MCP/Skill/canvas operation exactly once. */
-  applyOperation(snapshot: VaultSnapshot, operation: KnowledgeGraphOperation): AppliedKnowledgeGraphOperation;
+  applyOperation(
+    snapshot: VaultSnapshot,
+    operation: KnowledgeGraphOperation,
+    sideEffects?: LedgerSideEffects,
+  ): AppliedKnowledgeGraphOperation;
   undo(): VaultSnapshot | undefined;
+  undoWithSideEffects(): LedgerUndoResult | undefined;
 }
 
 export class LocalKnowledgeBridgeBackend implements KnowledgeBridgeBackend {
@@ -73,23 +80,48 @@ export class LocalKnowledgeBridgeBackend implements KnowledgeBridgeBackend {
         type: change.kind,
         createdAt: Date.now(),
       } satisfies KnowledgeGraphOperationMeta);
-    this.ledger.save(change.snapshot, change.kind, operation);
-    return change.snapshot;
+    const previous = this.ledger.load();
+    let governed = enforceFrozenL2Governance(enforceCrossScaleGovernance(change.snapshot));
+    if (change.kind !== "managed-link-restore") {
+      const severedIds = new Set(
+        previous.relations.filter((relation) => relation.status === "severed").map((relation) => relation.id),
+      );
+      if (severedIds.size > 0) {
+        governed = {
+          ...governed,
+          relations: governed.relations.map((relation) =>
+            severedIds.has(relation.id) ? { ...relation, status: "severed" as const } : relation,
+          ),
+        };
+      }
+    }
+    this.ledger.save(governed, change.kind, operation, change.sideEffects);
+    return governed;
   }
 
-  applyOperation(snapshot: VaultSnapshot, operation: KnowledgeGraphOperation): AppliedKnowledgeGraphOperation {
+  applyOperation(
+    snapshot: VaultSnapshot,
+    operation: KnowledgeGraphOperation,
+    sideEffects?: LedgerSideEffects,
+  ): AppliedKnowledgeGraphOperation {
     const applied = applyKnowledgeGraphOperation(snapshot, operation);
     if (applied.changed) {
-      this.commit({
+      const persisted = this.commit({
         snapshot: applied.snapshot,
         kind: applied.transactionKind,
         operation: applied.meta,
+        sideEffects,
       });
+      return { ...applied, snapshot: persisted };
     }
     return applied;
   }
 
   undo(): VaultSnapshot | undefined {
     return this.ledger.undo();
+  }
+
+  undoWithSideEffects(): LedgerUndoResult | undefined {
+    return this.ledger.undoWithSideEffects();
   }
 }

@@ -4,6 +4,7 @@ import {
   applyKnowledgeGraphOperation,
   createAgentProposalOperation,
   createCanvasPositionOperation,
+  createNodeDetailsOperation,
 } from "./operations";
 import { draftPaperBridgeLocally } from "./paperBridgeAi";
 
@@ -51,6 +52,18 @@ describe("Knowledge Bridge operation protocol", () => {
 
     expect(applied.changed).toBe(false);
     expect(applied.snapshot).toBe(snapshot);
+  });
+
+  it("persists one reusable editor value on the corresponding knowledge node", () => {
+    const snapshot = structuredClone(demoVaultSnapshot);
+    const applied = applyKnowledgeGraphOperation(
+      snapshot,
+      createNodeDetailsOperation([{ id: "l1-cell", markdown: "# Cell\n\nEdited knowledge" }], 450),
+    );
+    expect(applied.changed).toBe(true);
+    expect(applied.snapshot.nodes.find((node) => node.id === "l1-cell")?.detailsMarkdown).toBe(
+      "# Cell\n\nEdited knowledge",
+    );
   });
 
   it("does not apply an adopted AI draft a second time", () => {

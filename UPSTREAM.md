@@ -16,7 +16,8 @@ The repository has a read-only `project-graph` remote pointing to `https://githu
 - `app/src/knowledge-bridge/` contains all domain rules, AI orchestration, ledger state, Vault sync, bridge UI data, the `KnowledgeBridgeBackend` contract, and the versioned operation protocol. It is product-owned.
 - `app/src/sub/KnowledgeBridgeWelcomeWindow.tsx` and `app/src/sub/KnowledgeBridgeWindow.tsx` are the only Project Graph window mounts for the welcome flow and workspace.
 - `app/src/components/global-menu-content.tsx` is a presentation-only menu filter. It keeps the original commands available through the command palette while reducing the default menu to daily actions.
-- `app/src/core/service/controlService/controller/concrete/ControllerNodeEdit.tsx`, `app/src/core/service/controlService/controller/concrete/utilsControl.tsx`, `app/src/core/stage/stageObject/entity/TextNode.tsx`, and `app/src/sub/NodeDetailsWindow.tsx` are the only deliberate core hooks. Together they provide one-click node details and a single reusable detail editor.
+- `app/src/core/service/controlService/controller/concrete/ControllerNodeEdit.tsx`, `app/src/core/service/controlService/controller/concrete/utilsControl.tsx`, `app/src/core/stage/stageObject/entity/TextNode.tsx`, and `app/src/sub/NodeDetailsWindow.tsx` provide one-click node details and a single reusable detail editor.
+- `app/src/core/render/canvas2d/entityRenderer/edge/concrete/StraightEdgeRenderer.tsx` recognizes one Knowledge Bridge presentation token, `knowledge-bridge-tension`, and renders the evidence bundle as blue/red dashed halves. It contains no evidence aggregation or knowledge-model logic.
 
 Do not place knowledge semantics in the renderer, stage, selection controller, or Project Graph serialization model. New Knowledge Bridge features should first be added under `app/src/knowledge-bridge/`, then exposed through `KnowledgeBridgeWindow` or one documented hook above.
 
@@ -25,4 +26,5 @@ Do not place knowledge semantics in the renderer, stage, selection controller, o
 - `backend.ts` is the only frontend-facing entry point for Agent, MCP, Skill, commit, operation, and undo behavior. Future Tauri commands, a Rust sidecar, or a local service must implement this contract rather than changing `KnowledgeBridgeWindow` business logic.
 - `operations.ts` is the source of truth for typed changes emitted by AI/MCP/Skills and Project Graph canvas movement. It is intentionally independent of Project Graph classes.
 - `canvas.ts` is a narrow adapter: it materializes ledger nodes and relation bundles, reads managed-node positions, and preserves user drag positions during unrelated refreshes. It must not contain learning semantics or call Agent/MCP code.
+- Semantic zoom and viewport materialization remain entirely in `knowledge-bridge/canvas.ts`, `semanticZoom.ts`, and `spatialIndex.ts`. No Project Graph camera or layout implementation is patched; zoom never changes saved coordinates.
 - `canvasPosition.ts` contains the pure position-precedence rule and has unit tests. Upstream drag-event improvements can replace polling in `KnowledgeBridgeWindow` without modifying the graph ledger or operation format.

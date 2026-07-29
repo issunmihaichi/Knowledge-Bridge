@@ -8,7 +8,8 @@ Knowledge Bridge is a local-first visual knowledge system for connecting familia
 - L1-L4 knowledge roles with separate logical and cognitive relation layers
 - evidence levels, perspective-dependent evidence tension, and scale conversion protocols
 - an isolated Pending Pool for Markdown links, lineage candidates, and AI bridge suggestions
-- stable managed Markdown links using `<!-- kb-link:edge_id -->`, including sever and retarget reconciliation
+- stable managed Markdown links using `<!-- kb-link:edge_id -->`, including sever, retarget, explicit restore, and undo
+- three-stage startup with incremental metadata caching, background Worker parsing, and viewport node materialization
 - a native Knowledge Bridge dock with indexing state, bridge review, evidence, and migration controls
 - an all-subject welcome workspace that starts from a user-confirmed learning anchor and source material
 - a configurable OpenAI-compatible AI connection for material-to-learning-anchor drafts
