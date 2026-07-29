@@ -42,7 +42,10 @@ jobs:
       - name: Build NSIS installer
         run: pnpm --filter @knowledge-bridge/app tauri:build
         env:
-          TAURI_BUILD_ARGS: --bundles nsis
+          # This CI job publishes an installable development artifact. The
+          # updater public key remains in the app configuration, but release
+          # signing requires a TAURI_SIGNING_PRIVATE_KEY GitHub secret.
+          TAURI_BUILD_ARGS: --bundles nsis --no-sign
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
