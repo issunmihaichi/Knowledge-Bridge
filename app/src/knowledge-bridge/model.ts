@@ -221,6 +221,15 @@ export interface AgentExecutionTrace {
   warnings: string[];
 }
 
+export type KnowledgeGraphOperationOrigin = "agent" | "canvas" | "mcp" | "skill" | "user";
+
+export interface KnowledgeGraphOperationMeta {
+  id: string;
+  origin: KnowledgeGraphOperationOrigin;
+  type: string;
+  createdAt: number;
+}
+
 export type GraphProposalOperation =
   | { type: "create-node"; node: KnowledgeNode }
   | { type: "create-relation"; relation: KnowledgeRelation };

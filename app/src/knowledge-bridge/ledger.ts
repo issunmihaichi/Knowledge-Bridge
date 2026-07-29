@@ -1,6 +1,6 @@
 import initSqlJs, { type Database } from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import type { KnowledgeRelation, ManagedLinkSnapshot, VaultSnapshot } from "./model";
+import type { KnowledgeGraphOperationMeta, KnowledgeRelation, ManagedLinkSnapshot, VaultSnapshot } from "./model";
 
 const DB_KEY = "knowledge-bridge.graph.db";
 
@@ -132,7 +132,7 @@ export class GraphLedger {
     });
   }
 
-  save(snapshot: VaultSnapshot, kind = "graph-save") {
+  save(snapshot: VaultSnapshot, kind = "graph-save", operation?: KnowledgeGraphOperationMeta) {
     const before = this.load();
     snapshot = normalizeSnapshot(snapshot);
     this.db.run("BEGIN");
@@ -160,7 +160,7 @@ export class GraphLedger {
         this.db.run("INSERT INTO graph_proposals VALUES (?, ?)", [proposal.id, JSON.stringify(proposal)]);
       this.db.run("INSERT INTO transactions(kind, payload, created_at) VALUES (?, ?, ?)", [
         kind,
-        JSON.stringify({ before, after: snapshot }),
+        JSON.stringify({ before, after: snapshot, operation }),
         Date.now(),
       ]);
       this.db.run("COMMIT");

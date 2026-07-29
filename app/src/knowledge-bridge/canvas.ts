@@ -6,9 +6,18 @@ import { DetailsManager } from "@/core/stage/stageObject/tools/entityDetailsMana
 import { Color, Vector } from "@graphif/data-structures";
 import { Rectangle } from "@graphif/shapes";
 import { relationBundles, type RelationBundle } from "./governance";
+import { shouldApplyLedgerPosition } from "./canvasPosition";
 import type { KnowledgeNode, KnowledgeRelation, VaultSnapshot } from "./model";
+import type { KnowledgeNodePosition } from "./operations";
 
-const managedGraphs = new WeakMap<Project, { signature: string; nodes: TextNode[]; edges: LineEdge[] }>();
+type ManagedKnowledgeGraph = {
+  signature: string;
+  nodes: Map<string, TextNode>;
+  edges: LineEdge[];
+  ledgerPositions: Map<string, { x: number; y: number }>;
+};
+
+const managedGraphs = new WeakMap<Project, ManagedKnowledgeGraph>();
 
 const roleColors: Record<KnowledgeNode["role"], Color> = {
   L1: new Color(23, 129, 173, 0.94),
@@ -84,6 +93,36 @@ function addEdge(
   return edge;
 }
 
+function createNode(project: Project, item: KnowledgeNode): TextNode {
+  return new TextNode(project, {
+    uuid: `kb:node:${item.id}`,
+    text: titleFor(item),
+    collisionBox: new CollisionBox([new Rectangle(new Vector(item.x, item.y), Vector.getZero())]),
+    color: item.status === "frozen" ? new Color(128, 132, 141, 0.72) : roleColors[item.role].clone(),
+    fontScaleLevel: item.role === "L1" ? 0 : -1,
+    details: DetailsManager.markdownToDetails(detailsFor(item)),
+    openDetailsOnClick: true,
+  });
+}
+
+function updateNode(
+  node: TextNode,
+  item: KnowledgeNode,
+  previousLedgerPosition: { x: number; y: number } | undefined,
+): void {
+  node.text = titleFor(item);
+  node.color = item.status === "frozen" ? new Color(128, 132, 141, 0.72) : roleColors[item.role].clone();
+  node.details = DetailsManager.markdownToDetails(detailsFor(item));
+  node.openDetailsOnClick = true;
+  node.setFontScaleLevel(item.role === "L1" ? 0 : -1);
+
+  const ledgerPosition = { x: item.x, y: item.y };
+  const canvasPosition = node.rectangle.location;
+  if (shouldApplyLedgerPosition(ledgerPosition, canvasPosition, previousLedgerPosition)) {
+    node.moveTo(new Vector(item.x, item.y));
+  }
+}
+
 /**
  * Mirrors the ledger into the active Project Graph canvas. The generated
  * objects are tracked separately, so hand-authored canvas objects are never
@@ -95,23 +134,18 @@ export function synchronizeKnowledgeBridgeCanvas(project: Project, snapshot: Vau
   if (previous?.signature === signature) return;
 
   for (const edge of previous?.edges ?? []) project.stageManager.delete(edge);
-  for (const node of previous?.nodes ?? []) project.stageManager.delete(node);
-
   const nodes = new Map<string, TextNode>();
-  const createdNodes: TextNode[] = [];
+  const ledgerPositions = new Map<string, { x: number; y: number }>();
   for (const item of snapshot.nodes) {
-    const node = new TextNode(project, {
-      uuid: `kb:node:${item.id}`,
-      text: titleFor(item),
-      collisionBox: new CollisionBox([new Rectangle(new Vector(item.x, item.y), Vector.getZero())]),
-      color: item.status === "frozen" ? new Color(128, 132, 141, 0.72) : roleColors[item.role].clone(),
-      fontScaleLevel: item.role === "L1" ? 0 : -1,
-      details: DetailsManager.markdownToDetails(detailsFor(item)),
-      openDetailsOnClick: true,
-    });
-    project.stageManager.add(node, true);
+    const existing = previous?.nodes.get(item.id);
+    const node = existing ?? createNode(project, item);
+    if (!existing) project.stageManager.add(node, true);
+    else updateNode(node, item, previous?.ledgerPositions.get(item.id));
     nodes.set(item.id, node);
-    createdNodes.push(node);
+    ledgerPositions.set(item.id, { x: item.x, y: item.y });
+  }
+  for (const [nodeId, node] of previous?.nodes ?? []) {
+    if (!nodes.has(nodeId)) project.stageManager.delete(node);
   }
 
   const createdEdges: LineEdge[] = [];
@@ -131,14 +165,24 @@ export function synchronizeKnowledgeBridgeCanvas(project: Project, snapshot: Vau
   }
 
   project.stageManager.updateReferences();
-  managedGraphs.set(project, { signature, nodes: createdNodes, edges: createdEdges });
+  managedGraphs.set(project, { signature, nodes, edges: createdEdges, ledgerPositions });
+}
+
+export function readKnowledgeBridgeCanvasPositions(project: Project): KnowledgeNodePosition[] {
+  const managed = managedGraphs.get(project);
+  if (!managed) return [];
+  return [...managed.nodes.entries()].map(([id, node]) => ({
+    id,
+    x: node.rectangle.location.x,
+    y: node.rectangle.location.y,
+  }));
 }
 
 export function clearKnowledgeBridgeCanvas(project: Project): void {
   const previous = managedGraphs.get(project);
   if (!previous) return;
   for (const edge of previous.edges) project.stageManager.delete(edge);
-  for (const node of previous.nodes) project.stageManager.delete(node);
+  for (const node of previous.nodes.values()) project.stageManager.delete(node);
   project.stageManager.updateReferences();
   managedGraphs.delete(project);
 }

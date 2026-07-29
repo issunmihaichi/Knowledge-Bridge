@@ -12,6 +12,7 @@ Knowledge Bridge is a local-first visual knowledge system for connecting familia
 - a native Knowledge Bridge dock with indexing state, bridge review, evidence, and migration controls
 - an all-subject welcome workspace that starts from a user-confirmed learning anchor and source material
 - a configurable OpenAI-compatible AI connection for material-to-learning-anchor drafts
+- a stable backend contract joining the UI to the LLM Agent, MCP orchestrator, Skill resolver, and versioned graph operations
 
 ## Development
 
@@ -40,6 +41,12 @@ This SQLite ledger holds the formal graph, AI drafts, pending mentions, evidence
 Open `Knowledge Bridge` and use the AI settings control at the bottom of its side panel to enter an OpenAI-compatible base URL, model name, and (when required) API key. The key is retained only in local application storage on that device. A generated chain is always a draft: it shows the selected L1 anchor and L2 mechanism, can be saved, and still requires explicit adoption before it becomes a learning path.
 
 Without an AI connection, Knowledge Bridge produces a clearly labeled local draft from the existing ledger. If a configured service fails, the result is labeled as a fallback and includes the failure reason.
+
+## Architecture
+
+Project Graph remains the interaction surface. Knowledge Bridge uses a stable `KnowledgeBridgeBackend` boundary between that UI and its local Agent, MCP, Skill, operation, and SQLite ledger layers. AI and MCP outputs remain drafts until the user approves and adopts them; the resulting graph operation is versioned, traceable, and undoable. Canvas node moves are also recorded as operations, so the canvas and ledger stay in sync without recreating nodes or losing a drag in progress.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full three-layer design, operation protocol, and upgrade path to a Tauri command, sidecar, or local service.
 
 ## License and upstream attribution
 

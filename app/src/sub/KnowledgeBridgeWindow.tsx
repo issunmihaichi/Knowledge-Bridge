@@ -6,12 +6,12 @@ import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { Project } from "@/core/Project";
-import { runApprovedKnowledgeBridgeTools, runKnowledgeBridgeAgent } from "@/knowledge-bridge/agentRuntime";
 import { loadAiConnection, saveAiConnection, type AiConnectionSettings } from "@/knowledge-bridge/aiSettings";
-import { applyGraphChangeProposal, createGraphChangeProposal } from "@/knowledge-bridge/graphProposal";
+import { LocalKnowledgeBridgeBackend, type KnowledgeBridgeBackend } from "@/knowledge-bridge/backend";
 import { collectVaultFiles, indexMarkdown, toPending } from "@/knowledge-bridge/indexer";
 import { GraphLedger } from "@/knowledge-bridge/ledger";
 import { rejectPendingMcpRequests } from "@/knowledge-bridge/mcpOrchestrator";
+import { createAgentProposalOperation, createCanvasPositionOperation } from "@/knowledge-bridge/operations";
 import {
   applyHighConfidenceMigration,
   buildFrozenL2MigrationPreview,
@@ -23,6 +23,7 @@ import {
   demoVaultSnapshot,
   emptyVaultSnapshot,
   type IndexProgress,
+  type KnowledgeGraphOperationMeta,
   type McpToolRequestStatus,
   type PaperBridgeDraft,
   type PendingMention,
@@ -250,6 +251,7 @@ const mcpRequestStatusLabels: Record<McpToolRequestStatus, string> = {
 
 function PaperBridgePanel({
   snapshot,
+  backend,
   connection,
   initialInput,
   onSaveDraft,
@@ -258,6 +260,7 @@ function PaperBridgePanel({
   projectUri,
 }: {
   snapshot: VaultSnapshot;
+  backend?: KnowledgeBridgeBackend;
   connection: AiConnectionSettings;
   initialInput: string;
   onSaveDraft: (draft: PaperBridgeDraft) => void;
@@ -282,16 +285,13 @@ function PaperBridgePanel({
   useEffect(() => setApprovedMcpRequestIds(new Set()), [displayedDraft?.id]);
 
   const generate = async () => {
+    if (!backend) {
+      toast.error("关系账本尚未就绪，请稍后重试。");
+      return;
+    }
     setGenerating(true);
     try {
-      setDraft(
-        await runKnowledgeBridgeAgent({
-          input,
-          snapshot,
-          connection,
-          projectUri,
-        }),
-      );
+      setDraft(await backend.draft(input, snapshot, connection, projectUri));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "材料草拟失败");
     } finally {
@@ -310,15 +310,19 @@ function PaperBridgePanel({
 
   const runApprovedMcp = async () => {
     if (!displayedDraft || approvedMcpRequestIds.size === 0) return;
+    if (!backend) {
+      toast.error("关系账本尚未就绪，请稍后重试。");
+      return;
+    }
     setRunningMcp(true);
     try {
-      const next = await runApprovedKnowledgeBridgeTools({
-        draft: displayedDraft,
-        approvedRequestIds: [...approvedMcpRequestIds],
+      const next = await backend.runApprovedTools(
+        displayedDraft,
+        [...approvedMcpRequestIds],
         snapshot,
         connection,
         projectUri,
-      });
+      );
       setDraft(next);
       setApprovedMcpRequestIds(new Set());
       const completed = next.agentTrace?.mcp.requests?.filter((request) => request.status === "completed").length ?? 0;
@@ -817,6 +821,7 @@ export default function KnowledgeBridgeWindow({
   const [indexProgress, setIndexProgress] = useState<IndexProgress>({ phase: "idle", current: 0, total: 0 });
   const snapshotRef = useRef(snapshot);
   const ledgerRef = useRef<GraphLedger | undefined>(undefined);
+  const backendRef = useRef<LocalKnowledgeBridgeBackend | undefined>(undefined);
   const adapterRef = useRef<VaultAdapter>(new DemoVaultAdapter());
   const ledgerWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
   const ledgerEpochRef = useRef(0);
@@ -853,14 +858,14 @@ export default function KnowledgeBridgeWindow({
     };
   }, [activeProject, ledgerStatus, snapshot]);
 
-  const commitSnapshot = (next: VaultSnapshot, kind: string): boolean => {
-    const ledger = ledgerRef.current;
-    if (!ledger) {
+  const commitSnapshot = (next: VaultSnapshot, kind: string, operation?: KnowledgeGraphOperationMeta): boolean => {
+    const backend = backendRef.current;
+    if (!backend) {
       toast.error("关系账本尚未就绪，请稍后重试。");
       return false;
     }
     try {
-      ledger.save(next, kind);
+      backend.commit({ snapshot: next, kind, operation });
       snapshotRef.current = next;
       setSnapshot(next);
       return true;
@@ -872,6 +877,31 @@ export default function KnowledgeBridgeWindow({
       return false;
     }
   };
+
+  useEffect(() => {
+    if (ledgerStatus !== "ready" || !activeProject) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    void import("@/knowledge-bridge/canvas").then(({ readKnowledgeBridgeCanvasPositions }) => {
+      const persistMovedNodes = () => {
+        if (cancelled) return;
+        const operation = createCanvasPositionOperation(readKnowledgeBridgeCanvasPositions(activeProject));
+        const backend = backendRef.current;
+        if (!backend) return;
+        const applied = backend.applyOperation(snapshotRef.current, operation);
+        if (applied.changed) {
+          snapshotRef.current = applied.snapshot;
+          setSnapshot(applied.snapshot);
+        }
+      };
+      persistMovedNodes();
+      timer = window.setInterval(persistMovedNodes, 350);
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearInterval(timer);
+    };
+  }, [activeProject, ledgerStatus]);
 
   const enqueueLedgerWrite = (adapter: VaultAdapter, bytes: Uint8Array): Promise<void> => {
     setLedgerStatus("saving");
@@ -899,6 +929,7 @@ export default function KnowledgeBridgeWindow({
     let disposed = false;
     const epoch = ++ledgerEpochRef.current;
     ledgerRef.current = undefined;
+    backendRef.current = undefined;
     setLedgerError(undefined);
     setLedgerStatus("loading");
 
@@ -925,6 +956,7 @@ export default function KnowledgeBridgeWindow({
           );
           if (disposed || epoch !== ledgerEpochRef.current) return;
           ledgerRef.current = ledger;
+          backendRef.current = new LocalKnowledgeBridgeBackend(ledger);
           const saved = ledger.load();
           const next = hasSnapshotContent(saved)
             ? appendInitialAnchor(saved, initialAnchor)
@@ -935,7 +967,12 @@ export default function KnowledgeBridgeWindow({
           snapshotRef.current = next;
           setSnapshot(next);
           setLedgerStatus("ready");
-          if (next !== saved) ledger.save(next, hasSnapshotContent(saved) ? "resume-with-anchor" : "vault-create");
+          if (next !== saved) {
+            backendRef.current.commit({
+              snapshot: next,
+              kind: hasSnapshotContent(saved) ? "resume-with-anchor" : "vault-create",
+            });
+          }
           toast.message(`已恢复 ${recentVault.name}，新材料会基于已有锚点继续桥接。`);
           return;
         } catch (error) {
@@ -946,6 +983,7 @@ export default function KnowledgeBridgeWindow({
       const ledger = await GraphLedger.open();
       if (disposed || epoch !== ledgerEpochRef.current) return;
       ledgerRef.current = ledger;
+      backendRef.current = new LocalKnowledgeBridgeBackend(ledger);
       adapterRef.current = new DemoVaultAdapter();
       setVaultName(initialVaultName);
       setPersistenceMode("browser");
@@ -960,10 +998,10 @@ export default function KnowledgeBridgeWindow({
       setSnapshot(next);
       setLedgerStatus("ready");
       if (next !== saved || !hasSnapshotContent(saved)) {
-        ledger.save(
-          next,
-          hasSnapshotContent(saved) ? "resume-with-anchor" : freshStart ? "welcome-start" : "initial-empty",
-        );
+        backendRef.current.commit({
+          snapshot: next,
+          kind: hasSnapshotContent(saved) ? "resume-with-anchor" : freshStart ? "welcome-start" : "initial-empty",
+        });
       }
       if (recentVaultError) {
         toast.warning(`最近的 Vault 无法恢复，已切换到本地持久账本：${String(recentVaultError)}`);
@@ -972,6 +1010,7 @@ export default function KnowledgeBridgeWindow({
       if (disposed || epoch !== ledgerEpochRef.current) return;
       const message = String(error);
       ledgerRef.current = undefined;
+      backendRef.current = undefined;
       setLedgerError(message);
       setLedgerStatus("error");
       toast.error(`关系账本打开失败：${message}`);
@@ -1073,6 +1112,7 @@ export default function KnowledgeBridgeWindow({
 
   const switchVault = async () => {
     const previousLedger = ledgerRef.current;
+    const previousBackend = backendRef.current;
     try {
       await ledgerWriteQueueRef.current.catch(() => undefined);
       const adapter = await pickVault();
@@ -1089,6 +1129,7 @@ export default function KnowledgeBridgeWindow({
 
       adapterRef.current = adapter;
       ledgerRef.current = vaultLedger;
+      backendRef.current = new LocalKnowledgeBridgeBackend(vaultLedger);
       rememberRecentVault(adapter);
       setVaultName(adapter.name);
       setPersistenceMode("vault");
@@ -1098,15 +1139,17 @@ export default function KnowledgeBridgeWindow({
         const next = appendInitialAnchor(saved, initialAnchor);
         snapshotRef.current = next;
         setSnapshot(next);
-        if (next !== saved) vaultLedger.save(next, "resume-with-anchor");
+        if (next !== saved) backendRef.current.commit({ snapshot: next, kind: "resume-with-anchor" });
         toast.success(`已连接 ${adapter.name}，已载入其中的关系账本`);
       } else {
-        vaultLedger.save(snapshotRef.current, "vault-create");
+        backendRef.current.commit({ snapshot: snapshotRef.current, kind: "vault-create" });
         toast.success(`已连接 ${adapter.name}，关系账本将保存到 .knowledge-bridge/graph.db`);
       }
       await startScan(adapter);
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") toast.error(String(error));
+      ledgerRef.current = previousLedger;
+      backendRef.current = previousBackend;
       setLedgerStatus(previousLedger ? "ready" : "error");
     }
   };
@@ -1161,20 +1204,18 @@ export default function KnowledgeBridgeWindow({
 
   const adoptPaperDraft = (draft: PaperBridgeDraft) => {
     const current = snapshotRef.current;
-    const adoptedDraft = { ...draft, status: "adopted" as const };
-    const paperDrafts = current.paperDrafts.some((item) => item.id === draft.id)
-      ? current.paperDrafts.map((item) => (item.id === draft.id ? adoptedDraft : item))
-      : [...current.paperDrafts, adoptedDraft];
-    const proposal = createGraphChangeProposal(draft, current);
-    const staged = {
-      ...current,
-      paperDrafts,
-      graphProposals: [...current.graphProposals, proposal],
-    };
-    const committed = commitSnapshot(applyGraphChangeProposal(staged, proposal.id), "agent-graph-proposal-apply");
-    if (!committed) return false;
-    const nodeCount = proposal.operations.filter((operation) => operation.type === "create-node").length;
-    const relationCount = proposal.operations.filter((operation) => operation.type === "create-relation").length;
+    const backend = backendRef.current;
+    if (!backend) {
+      toast.error("关系账本尚未就绪，请稍后重试。");
+      return false;
+    }
+    const applied = backend.applyOperation(current, createAgentProposalOperation(draft));
+    if (!applied.changed) return false;
+    snapshotRef.current = applied.snapshot;
+    setSnapshot(applied.snapshot);
+    const proposal = applied.snapshot.graphProposals.at(-1);
+    const nodeCount = proposal?.operations.filter((operation) => operation.type === "create-node").length ?? 0;
+    const relationCount = proposal?.operations.filter((operation) => operation.type === "create-relation").length ?? 0;
     toast.success(`已应用到画布：${nodeCount} 个待定节点，${relationCount} 条认知关系。`);
     return true;
   };
@@ -1200,13 +1241,13 @@ export default function KnowledgeBridgeWindow({
   };
 
   const undoLastChange = () => {
-    const ledger = ledgerRef.current;
-    if (!ledger) {
+    const backend = backendRef.current;
+    if (!backend) {
       toast.error("关系账本尚未就绪，请稍后重试。");
       return;
     }
     try {
-      const restored = ledger.undo();
+      const restored = backend.undo();
       if (!restored) {
         toast.message("没有可撤销的账本变更。");
         return;
@@ -1296,6 +1337,7 @@ export default function KnowledgeBridgeWindow({
           <TabsContent value="paper" className="min-h-0 overflow-y-auto p-3">
             <PaperBridgePanel
               snapshot={snapshot}
+              backend={backendRef.current}
               connection={aiConnection}
               initialInput={initialInput}
               onSaveDraft={savePaperDraft}
