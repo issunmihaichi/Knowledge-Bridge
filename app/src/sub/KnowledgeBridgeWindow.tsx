@@ -1,17 +1,17 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { createSubWindow } from "@/core/subWindowOpen";
-import { Project } from "@/core/Project";
-import { useComponentTabResourceTab } from "@/core/Tab";
+import type { Project } from "@/core/Project";
+import { runApprovedKnowledgeBridgeTools, runKnowledgeBridgeAgent } from "@/knowledge-bridge/agentRuntime";
 import { loadAiConnection, saveAiConnection, type AiConnectionSettings } from "@/knowledge-bridge/aiSettings";
-import { synchronizeKnowledgeBridgeCanvas } from "@/knowledge-bridge/canvas";
+import { applyGraphChangeProposal, createGraphChangeProposal } from "@/knowledge-bridge/graphProposal";
 import { collectVaultFiles, indexMarkdown, toPending } from "@/knowledge-bridge/indexer";
 import { GraphLedger } from "@/knowledge-bridge/ledger";
-import { draftPaperBridge } from "@/knowledge-bridge/paperBridgeAi";
+import { rejectPendingMcpRequests } from "@/knowledge-bridge/mcpOrchestrator";
 import {
   applyHighConfidenceMigration,
   buildFrozenL2MigrationPreview,
@@ -23,6 +23,7 @@ import {
   demoVaultSnapshot,
   emptyVaultSnapshot,
   type IndexProgress,
+  type McpToolRequestStatus,
   type PaperBridgeDraft,
   type PendingMention,
   type VaultSnapshot,
@@ -35,8 +36,6 @@ import {
   restoreRecentVault,
   type VaultAdapter,
 } from "@/knowledge-bridge/vault";
-import { Vector } from "@graphif/data-structures";
-import { Rectangle } from "@graphif/shapes";
 import {
   ArchiveRestore,
   Bot,
@@ -53,10 +52,13 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Undo2,
   X,
 } from "lucide-react";
+import { useAtomValue } from "jotai";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { activeResourceTabAtom } from "@/state";
 
 const kindLabels: Record<PendingMention["kind"], string> = {
   wikilink: "双链提及",
@@ -71,6 +73,8 @@ export interface KnowledgeBridgeLaunchOptions {
   initialAnchor?: string;
   freshStart?: boolean;
 }
+
+type LedgerStatus = "loading" | "ready" | "saving" | "error";
 
 function createStarterSnapshot(initialAnchor?: string): VaultSnapshot {
   const snapshot = structuredClone(emptyVaultSnapshot);
@@ -135,13 +139,14 @@ function appendInitialAnchor(snapshot: VaultSnapshot, initialAnchor?: string): V
 function hasSnapshotContent(snapshot: VaultSnapshot): boolean {
   return Boolean(
     snapshot.nodes.length ||
-      snapshot.relations.length ||
-      snapshot.pending.length ||
-      snapshot.protocols.length ||
-      snapshot.lenses.length ||
-      snapshot.argumentRoles.length ||
-      snapshot.migrationRecords.length ||
-      snapshot.paperDrafts.length,
+    snapshot.relations.length ||
+    snapshot.pending.length ||
+    snapshot.protocols.length ||
+    snapshot.lenses.length ||
+    snapshot.argumentRoles.length ||
+    snapshot.migrationRecords.length ||
+    snapshot.paperDrafts.length ||
+    snapshot.graphProposals.length,
   );
 }
 
@@ -164,56 +169,66 @@ function Metric({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-function PendingRow({ item, onResolve }: { item: PendingMention; onResolve: (id: string, accepted: boolean) => void }) {
-  const Icon = item.kind === "lineage" ? FileQuestion : item.kind === "ai-bridge" ? Sparkles : Link2;
-  return (
-    <div className="border-b px-3 py-2.5 last:border-b-0">
-      <div className="flex items-start gap-2">
-        <Icon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-medium">{item.targetTitle}</span>
-            <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
-              {kindLabels[item.kind]}
-            </Badge>
-          </div>
-          <div className="text-muted-foreground mt-1 truncate text-[11px]">{item.filePath}</div>
-          <div className="text-muted-foreground mt-1 text-xs leading-5">{item.raw}</div>
-        </div>
-        <div className="flex shrink-0 gap-1">
-          <Button size="icon" variant="ghost" className="size-7" title="确认" onClick={() => onResolve(item.id, true)}>
-            <Check className="size-3.5" />
-          </Button>
-          <Button size="icon" variant="ghost" className="size-7" title="忽略" onClick={() => onResolve(item.id, false)}>
-            <X className="size-3.5" />
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PendingPool({
-  items,
-  onResolve,
+function AiSettingsPanel({
+  value,
+  onSave,
 }: {
-  items: PendingMention[];
-  onResolve: (id: string, accepted: boolean) => void;
+  value: AiConnectionSettings;
+  onSave: (settings: AiConnectionSettings) => void;
 }) {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => setDraft(value), [value]);
+
   return (
-    <div className="overflow-hidden rounded-md border">
-      <div className="bg-muted/35 flex items-center justify-between border-b px-3 py-2">
-        <div className="flex items-center gap-2 text-xs font-medium">
-          <Search className="size-3.5" />
-          待整理
-        </div>
-        <Badge variant="secondary">{items.length}</Badge>
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <div className="text-sm font-medium">AI 连接</div>
+        <p className="text-muted-foreground text-xs leading-5">论文桥接和节点桥梁会使用同一 OpenAI 兼容服务。</p>
       </div>
-      {items.length > 0 ? (
-        items.map((item) => <PendingRow key={item.id} item={item} onResolve={onResolve} />)
-      ) : (
-        <div className="text-muted-foreground px-3 py-8 text-center text-xs">待定池已清空</div>
-      )}
+      <div className="space-y-2">
+        <label className="text-xs font-medium" htmlFor="kb-ai-endpoint">
+          服务地址
+        </label>
+        <Input
+          id="kb-ai-endpoint"
+          value={draft.endpoint}
+          onChange={(event) => setDraft((current) => ({ ...current, endpoint: event.target.value }))}
+          placeholder="https://api.example.com/v1"
+          autoComplete="url"
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-xs font-medium" htmlFor="kb-ai-model">
+          模型
+        </label>
+        <Input
+          id="kb-ai-model"
+          value={draft.model}
+          onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))}
+          placeholder="gpt-4.1-mini"
+        />
+      </div>
+      <div className="space-y-2">
+        <label className="text-xs font-medium" htmlFor="kb-ai-key">
+          API Key（可选）
+        </label>
+        <Input
+          id="kb-ai-key"
+          type="password"
+          value={draft.apiKey}
+          onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
+          placeholder="仅保存在当前设备"
+          autoComplete="off"
+        />
+      </div>
+      <Button className="w-full" size="sm" onClick={() => onSave(draft)}>
+        <SlidersHorizontal />
+        保存 AI 设置
+      </Button>
+      <div className="border-muted-foreground/30 text-muted-foreground border-l pl-2 text-[11px] leading-5">
+        连接信息只用于请求你指定的服务。模型结果始终先作为草稿保存，不会自动成为正式关系。
+      </div>
     </div>
   );
 }
@@ -226,6 +241,13 @@ const paperStepLabels: Record<PaperBridgeDraft["chain"][number]["role"], string>
   "scale-gap": "尺度鸿沟",
 };
 
+const mcpRequestStatusLabels: Record<McpToolRequestStatus, string> = {
+  "pending-approval": "待批准",
+  completed: "已完成",
+  failed: "失败",
+  rejected: "已跳过",
+};
+
 function PaperBridgePanel({
   snapshot,
   connection,
@@ -233,28 +255,95 @@ function PaperBridgePanel({
   onSaveDraft,
   onAdoptDraft,
   onConfigure,
+  projectUri,
 }: {
   snapshot: VaultSnapshot;
   connection: AiConnectionSettings;
   initialInput: string;
   onSaveDraft: (draft: PaperBridgeDraft) => void;
-  onAdoptDraft: (draftId: string) => boolean;
+  onAdoptDraft: (draft: PaperBridgeDraft) => boolean;
   onConfigure: () => void;
+  projectUri?: string;
 }) {
   const [input, setInput] = useState(initialInput);
   const [draft, setDraft] = useState<PaperBridgeDraft | undefined>();
   const [generating, setGenerating] = useState(false);
-  const displayedDraft = draft ?? snapshot.paperDrafts.at(-1);
+  const [runningMcp, setRunningMcp] = useState(false);
+  const [approvedMcpRequestIds, setApprovedMcpRequestIds] = useState<Set<string>>(() => new Set());
+  const draftIsApplied = draft
+    ? snapshot.graphProposals.some((proposal) => proposal.sourceDraftId === draft.id && proposal.status === "applied")
+    : false;
+  const displayedDraft = draft
+    ? { ...draft, status: draftIsApplied ? ("adopted" as const) : ("draft" as const) }
+    : snapshot.paperDrafts.at(-1);
+  const mcpRequests = displayedDraft?.agentTrace?.mcp.requests ?? [];
+  const pendingMcpRequests = mcpRequests.filter((request) => request.status === "pending-approval");
+
+  useEffect(() => setApprovedMcpRequestIds(new Set()), [displayedDraft?.id]);
 
   const generate = async () => {
     setGenerating(true);
     try {
-      setDraft(await draftPaperBridge(input, snapshot, Date.now(), connection));
+      setDraft(
+        await runKnowledgeBridgeAgent({
+          input,
+          snapshot,
+          connection,
+          projectUri,
+        }),
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "材料草拟失败");
     } finally {
       setGenerating(false);
     }
+  };
+
+  const toggleMcpApproval = (requestId: string, approved: boolean) => {
+    setApprovedMcpRequestIds((current) => {
+      const next = new Set(current);
+      if (approved) next.add(requestId);
+      else next.delete(requestId);
+      return next;
+    });
+  };
+
+  const runApprovedMcp = async () => {
+    if (!displayedDraft || approvedMcpRequestIds.size === 0) return;
+    setRunningMcp(true);
+    try {
+      const next = await runApprovedKnowledgeBridgeTools({
+        draft: displayedDraft,
+        approvedRequestIds: [...approvedMcpRequestIds],
+        snapshot,
+        connection,
+        projectUri,
+      });
+      setDraft(next);
+      setApprovedMcpRequestIds(new Set());
+      const completed = next.agentTrace?.mcp.requests?.filter((request) => request.status === "completed").length ?? 0;
+      toast.success(`MCP 调用完成：${completed} 项结果已回灌到学习链条。`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "MCP 调用失败");
+    } finally {
+      setRunningMcp(false);
+    }
+  };
+
+  const skipPendingMcp = () => {
+    if (!displayedDraft?.agentTrace || pendingMcpRequests.length === 0) return;
+    const rejected = new Set(pendingMcpRequests.map((request) => request.id));
+    setDraft({
+      ...displayedDraft,
+      agentTrace: {
+        ...displayedDraft.agentTrace,
+        mcp: {
+          ...displayedDraft.agentTrace.mcp,
+          requests: rejectPendingMcpRequests(mcpRequests, rejected),
+        },
+      },
+    });
+    setApprovedMcpRequestIds(new Set());
   };
 
   return (
@@ -319,21 +408,101 @@ function PaperBridgePanel({
               <span className="font-medium">锚点依据：</span>
               {displayedDraft.anchorReason}
             </div>
+            {displayedDraft.agentTrace && (
+              <div className="bg-muted/25 space-y-1 border px-2.5 py-2 text-[11px]">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span>LLM：{displayedDraft.agentTrace.llm.model ?? displayedDraft.agentTrace.llm.provider}</span>
+                  <span>Skills：{displayedDraft.agentTrace.skills.activated.length}</span>
+                  <span>
+                    MCP：{displayedDraft.agentTrace.mcp.invokedTools.length}/
+                    {displayedDraft.agentTrace.mcp.availableTools.length}
+                    {pendingMcpRequests.length > 0 ? ` · 待批准 ${pendingMcpRequests.length}` : ""}
+                  </span>
+                </div>
+                {displayedDraft.agentTrace.skills.activated.length > 0 && (
+                  <div className="text-muted-foreground truncate">
+                    已启用：{displayedDraft.agentTrace.skills.activated.join("、")}
+                  </div>
+                )}
+                {mcpRequests.length > 0 && (
+                  <div className="space-y-2 border-t pt-2">
+                    {mcpRequests.map((request) => (
+                      <div key={request.id} className="flex items-start gap-2">
+                        <Checkbox
+                          className="mt-0.5"
+                          checked={approvedMcpRequestIds.has(request.id)}
+                          disabled={request.status !== "pending-approval" || runningMcp}
+                          onCheckedChange={(checked) => toggleMcpApproval(request.id, checked === true)}
+                          aria-label={`批准调用 ${request.server}/${request.tool}`}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate font-medium">
+                              {request.server}/{request.tool}
+                            </span>
+                            <Badge variant="outline" className="h-4 shrink-0 px-1 text-[9px]">
+                              {mcpRequestStatusLabels[request.status]}
+                            </Badge>
+                          </div>
+                          <div className="text-muted-foreground mt-0.5 leading-4">{request.reason}</div>
+                          {request.resultPreview && (
+                            <div className="text-muted-foreground mt-1 line-clamp-2 border-l pl-1.5 break-words">
+                              {request.resultPreview}
+                            </div>
+                          )}
+                          {request.error && <div className="mt-1 text-red-500">{request.error}</div>}
+                        </div>
+                      </div>
+                    ))}
+                    {pendingMcpRequests.length > 0 && (
+                      <div className="flex gap-1.5 pt-1">
+                        <Button
+                          size="sm"
+                          className="h-7 flex-1 text-[11px]"
+                          disabled={approvedMcpRequestIds.size === 0 || runningMcp}
+                          onClick={() => void runApprovedMcp()}
+                        >
+                          {runningMcp ? <LoaderCircle className="animate-spin" /> : <ShieldCheck />}
+                          {runningMcp ? "正在调用" : `批准并调用 (${approvedMcpRequestIds.size})`}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 px-2 text-[11px]"
+                          disabled={runningMcp}
+                          onClick={skipPendingMcp}
+                        >
+                          全部跳过
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {displayedDraft.agentTrace.warnings.length > 0 && (
+                  <div className="text-amber-500">{displayedDraft.agentTrace.warnings.join("；")}</div>
+                )}
+              </div>
+            )}
           </div>
           <div className="flex gap-2 border-t p-2">
-            <Button size="sm" variant="outline" className="flex-1" onClick={() => onSaveDraft(displayedDraft)}>
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1"
+              disabled={runningMcp}
+              onClick={() => onSaveDraft(displayedDraft)}
+            >
               保存草稿
             </Button>
             <Button
               size="sm"
               className="flex-1"
-              disabled={displayedDraft.status === "adopted"}
+              disabled={displayedDraft.status === "adopted" || runningMcp}
               onClick={() => {
-                if (onAdoptDraft(displayedDraft.id))
-                  setDraft((current) => current && { ...current, status: "adopted" });
+                if (onAdoptDraft(displayedDraft)) setDraft((current) => current && { ...current, status: "adopted" });
               }}
             >
-              {displayedDraft.status === "adopted" ? "已采用" : "采用路径"}
+              {displayedDraft.status === "adopted" ? "已应用" : "应用到画布"}
             </Button>
           </div>
         </div>
@@ -342,66 +511,56 @@ function PaperBridgePanel({
   );
 }
 
-function AiSettingsPanel({
-  value,
-  onSave,
-}: {
-  value: AiConnectionSettings;
-  onSave: (settings: AiConnectionSettings) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-
-  useEffect(() => setDraft(value), [value]);
-
+function PendingRow({ item, onResolve }: { item: PendingMention; onResolve: (id: string, accepted: boolean) => void }) {
+  const Icon = item.kind === "lineage" ? FileQuestion : item.kind === "ai-bridge" ? Sparkles : Link2;
   return (
-    <div className="space-y-4">
-      <div className="space-y-1">
-        <div className="text-sm font-medium">AI 连接</div>
-        <p className="text-muted-foreground text-xs leading-5">论文桥接和节点桥梁会使用同一 OpenAI 兼容服务。</p>
+    <div className="border-b px-3 py-2.5 last:border-b-0">
+      <div className="flex items-start gap-2">
+        <Icon className="text-muted-foreground mt-0.5 size-4 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium">{item.targetTitle}</span>
+            <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+              {kindLabels[item.kind]}
+            </Badge>
+          </div>
+          <div className="text-muted-foreground mt-1 truncate text-[11px]">{item.filePath}</div>
+          <div className="text-muted-foreground mt-1 text-xs leading-5">{item.raw}</div>
+        </div>
+        <div className="flex shrink-0 gap-1">
+          <Button size="icon" variant="ghost" className="size-7" title="确认" onClick={() => onResolve(item.id, true)}>
+            <Check className="size-3.5" />
+          </Button>
+          <Button size="icon" variant="ghost" className="size-7" title="忽略" onClick={() => onResolve(item.id, false)}>
+            <X className="size-3.5" />
+          </Button>
+        </div>
       </div>
-      <div className="space-y-2">
-        <label className="text-xs font-medium" htmlFor="kb-ai-endpoint">
-          服务地址
-        </label>
-        <Input
-          id="kb-ai-endpoint"
-          value={draft.endpoint}
-          onChange={(event) => setDraft((current) => ({ ...current, endpoint: event.target.value }))}
-          placeholder="https://api.example.com/v1"
-          autoComplete="url"
-        />
+    </div>
+  );
+}
+
+function PendingPool({
+  items,
+  onResolve,
+}: {
+  items: PendingMention[];
+  onResolve: (id: string, accepted: boolean) => void;
+}) {
+  return (
+    <div className="overflow-hidden rounded-md border">
+      <div className="bg-muted/35 flex items-center justify-between border-b px-3 py-2">
+        <div className="flex items-center gap-2 text-xs font-medium">
+          <Search className="size-3.5" />
+          待整理
+        </div>
+        <Badge variant="secondary">{items.length}</Badge>
       </div>
-      <div className="space-y-2">
-        <label className="text-xs font-medium" htmlFor="kb-ai-model">
-          模型
-        </label>
-        <Input
-          id="kb-ai-model"
-          value={draft.model}
-          onChange={(event) => setDraft((current) => ({ ...current, model: event.target.value }))}
-          placeholder="gpt-4.1-mini"
-        />
-      </div>
-      <div className="space-y-2">
-        <label className="text-xs font-medium" htmlFor="kb-ai-key">
-          API Key（可选）
-        </label>
-        <Input
-          id="kb-ai-key"
-          type="password"
-          value={draft.apiKey}
-          onChange={(event) => setDraft((current) => ({ ...current, apiKey: event.target.value }))}
-          placeholder="仅保存在当前设备"
-          autoComplete="off"
-        />
-      </div>
-      <Button className="w-full" size="sm" onClick={() => onSave(draft)}>
-        <SlidersHorizontal />
-        保存 AI 设置
-      </Button>
-      <div className="border-muted-foreground/30 border-l pl-2 text-[11px] leading-5 text-muted-foreground">
-        连接信息只用于请求你指定的服务。模型结果始终先作为草稿保存，不会自动成为正式关系。
-      </div>
+      {items.length > 0 ? (
+        items.map((item) => <PendingRow key={item.id} item={item} onResolve={onResolve} />)
+      ) : (
+        <div className="text-muted-foreground px-3 py-8 text-center text-xs">待定池已清空</div>
+      )}
     </div>
   );
 }
@@ -642,14 +801,19 @@ export default function KnowledgeBridgeWindow({
   initialAnchor,
   freshStart = false,
 }: KnowledgeBridgeLaunchOptions = {}) {
-  const resourceTab = useComponentTabResourceTab();
-  const project = resourceTab instanceof Project ? resourceTab : undefined;
+  const activeResourceTab = useAtomValue(activeResourceTabAtom);
+  const activeProject =
+    activeResourceTab && "stageManager" in activeResourceTab ? (activeResourceTab as Project) : undefined;
   const [snapshot, setSnapshot] = useState<VaultSnapshot>(() => createStarterSnapshot(initialAnchor));
   const starterSnapshotRef = useRef(snapshot);
   const [vaultName, setVaultName] = useState(initialVaultName);
   const [persistenceMode, setPersistenceMode] = useState<"browser" | "vault">("browser");
+  const [ledgerStatus, setLedgerStatus] = useState<LedgerStatus>("loading");
+  const [ledgerError, setLedgerError] = useState<string>();
+  const [ledgerAttempt, setLedgerAttempt] = useState(0);
   const [activeTab, setActiveTab] = useState("paper");
   const [aiConnection, setAiConnection] = useState<AiConnectionSettings>(() => loadAiConnection());
+  const [anchorInput, setAnchorInput] = useState("");
   const [indexProgress, setIndexProgress] = useState<IndexProgress>({ phase: "idle", current: 0, total: 0 });
   const snapshotRef = useRef(snapshot);
   const ledgerRef = useRef<GraphLedger | undefined>(undefined);
@@ -659,6 +823,18 @@ export default function KnowledgeBridgeWindow({
   const scanControllerRef = useRef<AbortController | undefined>(undefined);
   const scanning = indexProgress.phase === "scanning";
   const vaultBacked = persistenceMode === "vault";
+  const mutationDisabled = ledgerStatus !== "ready";
+  const ledgerBusy = ledgerStatus === "loading" || ledgerStatus === "saving";
+  const ledgerStatusLabel =
+    ledgerStatus === "loading"
+      ? "恢复中"
+      : ledgerStatus === "saving"
+        ? "保存中"
+        : ledgerStatus === "error"
+          ? "保存失败"
+          : scanning
+            ? "索引中"
+            : "已保存";
   const progressValue =
     scanning && indexProgress.total === 0
       ? undefined
@@ -667,69 +843,197 @@ export default function KnowledgeBridgeWindow({
         : 100;
 
   useEffect(() => {
-    if (project) synchronizeKnowledgeBridgeCanvas(project, snapshot);
-  }, [project, snapshot]);
+    if (ledgerStatus !== "ready" || !activeProject) return;
+    let cancelled = false;
+    void import("@/knowledge-bridge/canvas").then(({ synchronizeKnowledgeBridgeCanvas }) => {
+      if (!cancelled) synchronizeKnowledgeBridgeCanvas(activeProject, snapshot);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProject, ledgerStatus, snapshot]);
 
-  const commitSnapshot = (next: VaultSnapshot, kind: string) => {
-    snapshotRef.current = next;
-    setSnapshot(next);
-    ledgerRef.current?.save(next, kind);
+  const commitSnapshot = (next: VaultSnapshot, kind: string): boolean => {
+    const ledger = ledgerRef.current;
+    if (!ledger) {
+      toast.error("关系账本尚未就绪，请稍后重试。");
+      return false;
+    }
+    try {
+      ledger.save(next, kind);
+      snapshotRef.current = next;
+      setSnapshot(next);
+      return true;
+    } catch (error) {
+      const message = String(error);
+      setLedgerError(message);
+      setLedgerStatus("error");
+      toast.error(`无法保存关系账本：${message}`);
+      return false;
+    }
   };
 
   const enqueueLedgerWrite = (adapter: VaultAdapter, bytes: Uint8Array): Promise<void> => {
+    setLedgerStatus("saving");
     const write = ledgerWriteQueueRef.current
       .catch(() => undefined)
       .then(() => adapter.writeBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH, bytes));
     ledgerWriteQueueRef.current = write;
-    void write.catch((error: unknown) => toast.error(`无法保存关系账本：${String(error)}`));
+    void write
+      .then(() => {
+        if (ledgerWriteQueueRef.current !== write) return;
+        setLedgerError(undefined);
+        setLedgerStatus("ready");
+      })
+      .catch((error: unknown) => {
+        if (ledgerWriteQueueRef.current !== write) return;
+        const message = String(error);
+        setLedgerError(message);
+        setLedgerStatus("error");
+        toast.error(`无法保存关系账本：${message}`);
+      });
     return write;
   };
 
   useEffect(() => {
     let disposed = false;
     const epoch = ++ledgerEpochRef.current;
+    ledgerRef.current = undefined;
+    setLedgerError(undefined);
+    setLedgerStatus("loading");
+
     void (async () => {
-      const recentVault = await restoreRecentVault();
+      await ledgerWriteQueueRef.current.catch(() => undefined);
+      ledgerWriteQueueRef.current = Promise.resolve();
+
+      let recentVault: Awaited<ReturnType<typeof restoreRecentVault>>;
+      let recentVaultError: unknown;
+      try {
+        recentVault = await restoreRecentVault();
+      } catch (error) {
+        recentVaultError = error;
+      }
       if (disposed || epoch !== ledgerEpochRef.current) return;
 
       if (recentVault) {
-        const bytes = await recentVault.readBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH);
-        const ledger = await GraphLedger.open(
-          bytes && bytes.length > 0 ? bytes : undefined,
-          (nextBytes) => enqueueLedgerWrite(recentVault, nextBytes),
-          false,
-        );
-        if (disposed || epoch !== ledgerEpochRef.current) return;
-        ledgerRef.current = ledger;
-        const saved = ledger.load();
-        const next = hasSnapshotContent(saved) ? appendInitialAnchor(saved, initialAnchor) : starterSnapshotRef.current;
-        adapterRef.current = recentVault;
-        setVaultName(recentVault.name);
-        setPersistenceMode("vault");
-        snapshotRef.current = next;
-        setSnapshot(next);
-        if (next !== saved) ledger.save(next, hasSnapshotContent(saved) ? "resume-with-anchor" : "vault-create");
-        toast.message(`已恢复 ${recentVault.name}，新材料会基于已有锚点继续桥接。`);
-        return;
+        try {
+          const bytes = await recentVault.readBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH);
+          const ledger = await GraphLedger.open(
+            bytes && bytes.length > 0 ? bytes : undefined,
+            (nextBytes) => enqueueLedgerWrite(recentVault, nextBytes),
+            false,
+          );
+          if (disposed || epoch !== ledgerEpochRef.current) return;
+          ledgerRef.current = ledger;
+          const saved = ledger.load();
+          const next = hasSnapshotContent(saved)
+            ? appendInitialAnchor(saved, initialAnchor)
+            : starterSnapshotRef.current;
+          adapterRef.current = recentVault;
+          setVaultName(recentVault.name);
+          setPersistenceMode("vault");
+          snapshotRef.current = next;
+          setSnapshot(next);
+          setLedgerStatus("ready");
+          if (next !== saved) ledger.save(next, hasSnapshotContent(saved) ? "resume-with-anchor" : "vault-create");
+          toast.message(`已恢复 ${recentVault.name}，新材料会基于已有锚点继续桥接。`);
+          return;
+        } catch (error) {
+          recentVaultError = error;
+        }
       }
 
       const ledger = await GraphLedger.open();
       if (disposed || epoch !== ledgerEpochRef.current) return;
       ledgerRef.current = ledger;
+      adapterRef.current = new DemoVaultAdapter();
+      setVaultName(initialVaultName);
+      setPersistenceMode("browser");
       const saved = ledger.load();
+      let next: VaultSnapshot;
       if (hasSnapshotContent(saved) && !(freshStart && isBundledBiologyDemo(saved))) {
-        const next = appendInitialAnchor(saved, initialAnchor);
-        snapshotRef.current = next;
-        setSnapshot(next);
-        if (next !== saved) ledger.save(next, "resume-with-anchor");
+        next = appendInitialAnchor(saved, initialAnchor);
       } else {
-        ledger.save(starterSnapshotRef.current, freshStart ? "welcome-start" : "initial-empty");
+        next = starterSnapshotRef.current;
       }
-    })()
-      .catch((error: unknown) => toast.error(`关系账本打开失败：${String(error)}`));
+      snapshotRef.current = next;
+      setSnapshot(next);
+      setLedgerStatus("ready");
+      if (next !== saved || !hasSnapshotContent(saved)) {
+        ledger.save(
+          next,
+          hasSnapshotContent(saved) ? "resume-with-anchor" : freshStart ? "welcome-start" : "initial-empty",
+        );
+      }
+      if (recentVaultError) {
+        toast.warning(`最近的 Vault 无法恢复，已切换到本地持久账本：${String(recentVaultError)}`);
+      }
+    })().catch((error: unknown) => {
+      if (disposed || epoch !== ledgerEpochRef.current) return;
+      const message = String(error);
+      ledgerRef.current = undefined;
+      setLedgerError(message);
+      setLedgerStatus("error");
+      toast.error(`关系账本打开失败：${message}`);
+    });
     return () => {
       disposed = true;
       scanControllerRef.current?.abort();
+    };
+  }, [ledgerAttempt]);
+
+  useEffect(() => {
+    if (!("__TAURI_INTERNALS__" in window)) return;
+
+    let disposed = false;
+    let closeStarted = false;
+    let unlisten: (() => void) | undefined;
+
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) => {
+        const appWindow = getCurrentWindow();
+        return appWindow.onCloseRequested(async (event) => {
+          event.preventDefault();
+          if (closeStarted) return;
+          closeStarted = true;
+          scanControllerRef.current?.abort();
+
+          let timeoutId: ReturnType<typeof setTimeout> | undefined;
+          try {
+            const flushWrites = async () => {
+              let pendingWrite: Promise<void>;
+              do {
+                pendingWrite = ledgerWriteQueueRef.current;
+                await pendingWrite;
+              } while (pendingWrite !== ledgerWriteQueueRef.current);
+            };
+            const timeout = new Promise<void>((_, reject) => {
+              timeoutId = setTimeout(() => reject(new Error("Ledger flush timed out after 8 seconds")), 8_000);
+            });
+            await Promise.race([flushWrites(), timeout]);
+          } catch (error) {
+            console.error("Knowledge Bridge ledger flush failed while closing", error);
+          } finally {
+            if (timeoutId) clearTimeout(timeoutId);
+          }
+
+          try {
+            await appWindow.destroy();
+          } catch (error) {
+            closeStarted = false;
+            console.error("Knowledge Bridge window destroy failed", error);
+          }
+        });
+      })
+      .then((stopListening) => {
+        if (disposed) stopListening();
+        else unlisten = stopListening;
+      })
+      .catch((error: unknown) => console.error("Knowledge Bridge close handler failed", error));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
     };
   }, []);
 
@@ -750,8 +1054,9 @@ export default function KnowledgeBridgeWindow({
       const discovered = toPending(indexed, new Set(current.nodes.map((node) => node.id)));
       const merged = new Map(current.pending.map((item) => [item.id, item]));
       for (const item of discovered) merged.set(item.id, item);
-      commitSnapshot({ ...current, pending: [...merged.values()] }, "vault-index");
-      toast.success(`后台索引完成，发现 ${discovered.length} 个待处理提及`);
+      if (commitSnapshot({ ...current, pending: [...merged.values()] }, "vault-index")) {
+        toast.success(`后台索引完成，发现 ${discovered.length} 个待处理提及`);
+      }
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") toast.error(`Vault 索引失败：${String(error)}`);
       setIndexProgress({ phase: "cancelled", current: 0, total: 0 });
@@ -767,9 +1072,12 @@ export default function KnowledgeBridgeWindow({
   };
 
   const switchVault = async () => {
+    const previousLedger = ledgerRef.current;
     try {
       await ledgerWriteQueueRef.current.catch(() => undefined);
       const adapter = await pickVault();
+      setLedgerError(undefined);
+      setLedgerStatus("loading");
       const epoch = ++ledgerEpochRef.current;
       const bytes = await adapter.readBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH);
       const vaultLedger = await GraphLedger.open(
@@ -785,6 +1093,7 @@ export default function KnowledgeBridgeWindow({
       setVaultName(adapter.name);
       setPersistenceMode("vault");
       const saved = vaultLedger.load();
+      setLedgerStatus("ready");
       if (hasSnapshotContent(saved)) {
         const next = appendInitialAnchor(saved, initialAnchor);
         snapshotRef.current = next;
@@ -798,6 +1107,7 @@ export default function KnowledgeBridgeWindow({
       await startScan(adapter);
     } catch (error) {
       if ((error as DOMException).name !== "AbortError") toast.error(String(error));
+      setLedgerStatus(previousLedger ? "ready" : "error");
     }
   };
 
@@ -805,25 +1115,30 @@ export default function KnowledgeBridgeWindow({
     const current = snapshotRef.current;
     const item = current.pending.find((entry) => entry.id === id);
     if (!item) return;
-    commitSnapshot(
-      { ...current, pending: current.pending.filter((entry) => entry.id !== id) },
-      accepted ? "pending-confirm" : "pending-dismiss",
-    );
-    toast.success(accepted ? `已确认：${item.targetTitle}` : `已忽略：${item.targetTitle}`);
+    if (
+      commitSnapshot(
+        { ...current, pending: current.pending.filter((entry) => entry.id !== id) },
+        accepted ? "pending-confirm" : "pending-dismiss",
+      )
+    ) {
+      toast.success(accepted ? `已确认：${item.targetTitle}` : `已忽略：${item.targetTitle}`);
+    }
   };
 
   const freezeBridge = (l2Id: string) => {
     const node = snapshotRef.current.nodes.find((item) => item.id === l2Id);
     if (!node) return;
-    commitSnapshot(freezeL2(snapshotRef.current, l2Id), "l2-freeze");
-    toast.message(`${node.title} 已冻结；历史路径保留，等待替代预览。`);
+    if (commitSnapshot(freezeL2(snapshotRef.current, l2Id), "l2-freeze")) {
+      toast.message(`${node.title} 已冻结；历史路径保留，等待替代预览。`);
+    }
   };
 
   const applyMigration = (preview: ReturnType<typeof buildFrozenL2MigrationPreview>) => {
     const next = applyHighConfidenceMigration(snapshotRef.current, preview);
     const applied = next.migrationRecords.at(-1)?.pathMappings.length ?? 0;
-    commitSnapshot(next, "l2-migration");
-    toast.success(`已迁移 ${applied} 条高置信路径；其余路径继续冻结。`);
+    if (commitSnapshot(next, "l2-migration")) {
+      toast.success(`已迁移 ${applied} 条高置信路径；其余路径继续冻结。`);
+    }
   };
 
   const selectLens = (lensId: string) => {
@@ -839,25 +1154,28 @@ export default function KnowledgeBridgeWindow({
     const paperDrafts = current.paperDrafts.some((item) => item.id === draft.id)
       ? current.paperDrafts.map((item) => (item.id === draft.id ? draft : item))
       : [...current.paperDrafts, draft];
-    commitSnapshot({ ...current, paperDrafts }, "paper-bridge-draft");
-    toast.success("AI 学习链已保存为草稿，尚未进入正式推理。");
+    if (commitSnapshot({ ...current, paperDrafts }, "paper-bridge-draft")) {
+      toast.success("AI 学习链已保存为草稿，尚未进入正式推理。");
+    }
   };
 
-  const adoptPaperDraft = (draftId: string) => {
+  const adoptPaperDraft = (draft: PaperBridgeDraft) => {
     const current = snapshotRef.current;
-    const exists = current.paperDrafts.some((item) => item.id === draftId);
-    if (!exists) {
-      toast.message("请先保存该草稿，再采用为当前学习路径。");
-      return false;
-    }
-    commitSnapshot(
-      {
-        ...current,
-        paperDrafts: current.paperDrafts.map((item) => (item.id === draftId ? { ...item, status: "adopted" } : item)),
-      },
-      "paper-bridge-adopt",
-    );
-    toast.success("已采用为学习路径；仍需逐步复核，未创建正式逻辑关系。");
+    const adoptedDraft = { ...draft, status: "adopted" as const };
+    const paperDrafts = current.paperDrafts.some((item) => item.id === draft.id)
+      ? current.paperDrafts.map((item) => (item.id === draft.id ? adoptedDraft : item))
+      : [...current.paperDrafts, adoptedDraft];
+    const proposal = createGraphChangeProposal(draft, current);
+    const staged = {
+      ...current,
+      paperDrafts,
+      graphProposals: [...current.graphProposals, proposal],
+    };
+    const committed = commitSnapshot(applyGraphChangeProposal(staged, proposal.id), "agent-graph-proposal-apply");
+    if (!committed) return false;
+    const nodeCount = proposal.operations.filter((operation) => operation.type === "create-node").length;
+    const relationCount = proposal.operations.filter((operation) => operation.type === "create-relation").length;
+    toast.success(`已应用到画布：${nodeCount} 个待定节点，${relationCount} 条认知关系。`);
     return true;
   };
 
@@ -865,6 +1183,40 @@ export default function KnowledgeBridgeWindow({
     const next = saveAiConnection(settings);
     setAiConnection(next);
     toast.success(next.endpoint ? "AI 连接已保存。" : "AI 已切换为本地草拟模式。");
+  };
+
+  const addAnchor = () => {
+    const title = anchorInput.trim();
+    if (!title) return;
+    const current = snapshotRef.current;
+    const next = appendInitialAnchor(current, title);
+    if (next === current) {
+      toast.message("该旧知锚点已在当前账本中。");
+      return;
+    }
+    if (!commitSnapshot(next, "anchor-confirm")) return;
+    setAnchorInput("");
+    toast.success(`已确认旧知锚点：${title}`);
+  };
+
+  const undoLastChange = () => {
+    const ledger = ledgerRef.current;
+    if (!ledger) {
+      toast.error("关系账本尚未就绪，请稍后重试。");
+      return;
+    }
+    try {
+      const restored = ledger.undo();
+      if (!restored) {
+        toast.message("没有可撤销的账本变更。");
+        return;
+      }
+      snapshotRef.current = restored;
+      setSnapshot(restored);
+      toast.success("已撤销上次账本变更，画布已同步还原。");
+    } catch (error) {
+      toast.error(`撤销失败：${String(error)}`);
+    }
   };
 
   return (
@@ -878,71 +1230,126 @@ export default function KnowledgeBridgeWindow({
               {vaultBacked ? ".knowledge-bridge/graph.db" : "本机持久账本（自动恢复；连接 Vault 后写入 graph.db）"}
             </div>
           </div>
-          <Badge variant={scanning ? "secondary" : "outline"}>
-            {scanning ? <LoaderCircle className="animate-spin" /> : <ShieldCheck />}
-            {scanning ? "索引中" : "已保存"}
+          <Badge variant={ledgerStatus === "error" ? "destructive" : ledgerBusy || scanning ? "secondary" : "outline"}>
+            {ledgerBusy || scanning ? (
+              <LoaderCircle className="animate-spin" />
+            ) : ledgerStatus === "error" ? (
+              <CircleAlert />
+            ) : (
+              <ShieldCheck />
+            )}
+            {ledgerStatusLabel}
           </Badge>
         </div>
-        <Progress value={progressValue} className="mt-3 h-1" />
+        <Progress value={ledgerBusy ? undefined : progressValue} className="mt-3 h-1" />
+        {ledgerStatus === "error" ? (
+          <div className="border-destructive/40 bg-destructive/10 text-destructive mt-3 flex items-center gap-2 border px-2 py-2 text-xs">
+            <CircleAlert className="size-4 shrink-0" />
+            <span className="min-w-0 flex-1 truncate" title={ledgerError}>
+              账本不可用，修改已暂停。{ledgerError ? ` ${ledgerError}` : ""}
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 shrink-0"
+              onClick={() => setLedgerAttempt((value) => value + 1)}
+            >
+              重试
+            </Button>
+          </div>
+        ) : null}
         <div className="mt-3 flex border-y py-2">
           <Metric label="正式节点" value={snapshot.nodes.filter((item) => item.status === "formal").length} />
           <Metric label="逻辑关系" value={snapshot.relations.filter((item) => item.layer === "logical").length} />
           <Metric label="待整理" value={snapshot.pending.length} />
         </div>
-      </div>
-
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1 gap-0">
-        <TabsList variant="line" className="mx-3 mt-1 w-[calc(100%-1.5rem)] justify-start">
-          <TabsTrigger value="paper">材料桥接</TabsTrigger>
-          <TabsTrigger value="pending">待整理</TabsTrigger>
-          <TabsTrigger value="bridge">AI 桥梁</TabsTrigger>
-          <TabsTrigger value="evidence">证据与尺度</TabsTrigger>
-        </TabsList>
-        <TabsContent value="paper" className="min-h-0 overflow-y-auto p-3">
-          <PaperBridgePanel
-            snapshot={snapshot}
-            connection={aiConnection}
-            initialInput={initialInput}
-            onSaveDraft={savePaperDraft}
-            onAdoptDraft={adoptPaperDraft}
-            onConfigure={() => setActiveTab("ai")}
+        <div className="mt-3 flex gap-2">
+          <Input
+            value={anchorInput}
+            onChange={(event) => setAnchorInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") addAnchor();
+            }}
+            placeholder="输入你已经理解的概念，作为本次桥接的旧知锚点"
+            className="h-8 text-xs"
+            disabled={mutationDisabled}
           />
-        </TabsContent>
-        <TabsContent value="pending" className="min-h-0 overflow-y-auto p-3">
-          <PendingPool items={snapshot.pending} onResolve={resolvePending} />
-        </TabsContent>
-        <TabsContent value="bridge" className="min-h-0 overflow-y-auto p-3">
-          <BridgeSuggestions snapshot={snapshot} onFreeze={freezeBridge} onApplyMigration={applyMigration} />
-        </TabsContent>
-        <TabsContent value="evidence" className="min-h-0 overflow-y-auto p-3">
-          <EvidencePanel snapshot={snapshot} onSelectLens={selectLens} />
-        </TabsContent>
-        <TabsContent value="ai" className="min-h-0 overflow-y-auto p-3">
-          <AiSettingsPanel value={aiConnection} onSave={saveConnection} />
-        </TabsContent>
-      </Tabs>
-
-      <div className="flex items-center gap-2 border-t p-2">
-        <Button className="flex-1" size="sm" onClick={scanning ? cancelScan : () => void startScan()}>
-          {scanning ? <X /> : <RefreshCw />}
-          {scanning ? "取消扫描" : "后台索引"}
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => void switchVault()} disabled={scanning}>
-          {vaultBacked ? "更换 Vault" : "连接 Vault"}
-        </Button>
-        <Button size="icon" variant="ghost" title="AI 设置" onClick={() => setActiveTab("ai")}>
-          <SlidersHorizontal />
-        </Button>
+          <Button
+            size="sm"
+            className="h-8 shrink-0"
+            onClick={addAnchor}
+            disabled={mutationDisabled || !anchorInput.trim()}
+          >
+            确认旧知
+          </Button>
+        </div>
       </div>
+
+      <fieldset disabled={mutationDisabled} className="flex min-h-0 flex-1 flex-col border-0 p-0">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="min-h-0 flex-1 gap-0">
+          <TabsList variant="line" className="mx-3 mt-1 w-[calc(100%-1.5rem)] justify-start">
+            <TabsTrigger value="paper">材料桥接</TabsTrigger>
+            <TabsTrigger value="pending">待整理</TabsTrigger>
+            <TabsTrigger value="bridge">AI 桥梁</TabsTrigger>
+            <TabsTrigger value="evidence">证据与尺度</TabsTrigger>
+          </TabsList>
+          <TabsContent value="paper" className="min-h-0 overflow-y-auto p-3">
+            <PaperBridgePanel
+              snapshot={snapshot}
+              connection={aiConnection}
+              initialInput={initialInput}
+              onSaveDraft={savePaperDraft}
+              onAdoptDraft={adoptPaperDraft}
+              onConfigure={() => setActiveTab("ai")}
+              projectUri={activeProject?.uri.toString()}
+            />
+          </TabsContent>
+          <TabsContent value="pending" className="min-h-0 overflow-y-auto p-3">
+            <PendingPool items={snapshot.pending} onResolve={resolvePending} />
+          </TabsContent>
+          <TabsContent value="bridge" className="min-h-0 overflow-y-auto p-3">
+            <BridgeSuggestions snapshot={snapshot} onFreeze={freezeBridge} onApplyMigration={applyMigration} />
+          </TabsContent>
+          <TabsContent value="evidence" className="min-h-0 overflow-y-auto p-3">
+            <EvidencePanel snapshot={snapshot} onSelectLens={selectLens} />
+          </TabsContent>
+          <TabsContent value="ai" className="min-h-0 overflow-y-auto p-3">
+            <AiSettingsPanel value={aiConnection} onSave={saveConnection} />
+          </TabsContent>
+        </Tabs>
+
+        <div className="flex items-center gap-2 border-t p-2">
+          <Button className="flex-1" size="sm" onClick={scanning ? cancelScan : () => void startScan()}>
+            {scanning ? <X /> : <RefreshCw />}
+            {scanning ? "取消扫描" : "后台索引"}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => void switchVault()} disabled={scanning}>
+            {vaultBacked ? "更换 Vault" : "连接 Vault"}
+          </Button>
+          <Button size="icon" variant="ghost" title="撤销上次账本变更" onClick={undoLastChange}>
+            <Undo2 />
+          </Button>
+          <Button size="icon" variant="ghost" title="AI 设置" onClick={() => setActiveTab("ai")}>
+            <SlidersHorizontal />
+          </Button>
+        </div>
+      </fieldset>
     </div>
   );
 }
 
-KnowledgeBridgeWindow.open = (options: KnowledgeBridgeLaunchOptions = {}) => {
+KnowledgeBridgeWindow.open = async (options: KnowledgeBridgeLaunchOptions = {}) => {
+  const [{ createSubWindow }, { Vector }, { Rectangle }] = await Promise.all([
+    import("@/core/subWindowOpen"),
+    import("@graphif/data-structures"),
+    import("@graphif/shapes"),
+  ]);
   createSubWindow("KnowledgeBridgeWindow", {
     title: "Knowledge Bridge",
     contextTarget: "activeResourceTab",
     children: <KnowledgeBridgeWindow {...options} />,
-    rect: new Rectangle(new Vector(1020, 52), new Vector(390, 790)),
+    rect: Rectangle.inCenter(new Vector(Math.min(1120, innerWidth * 0.92), Math.min(780, innerHeight * 0.9))),
+    canDock: false,
+    closeWhenClickOutside: false,
   });
 };

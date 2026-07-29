@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "",
+    "beforeBuildCommand": "pnpm build",
     "beforeBundleCommand": "node ./scripts/collect-cef-linux.js",
     "frontendDist": "../dist",
     "removeUnusedCommands": true
@@ -19,8 +19,8 @@
         "url": "/index.html",
         "width": 1200,
         "height": 800,
-        "decorations": false,
-        "transparent": true,
+        "decorations": true,
+        "transparent": false,
         "visible": false
       }
     ],

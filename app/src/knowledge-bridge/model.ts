@@ -185,6 +185,59 @@ export interface MigrationRecord {
   undoneAt?: number;
 }
 
+export type McpToolRequestStatus = "pending-approval" | "completed" | "failed" | "rejected";
+
+export interface McpToolRequest {
+  id: string;
+  server: string;
+  tool: string;
+  modelName: string;
+  arguments: Record<string, unknown>;
+  reason: string;
+  status: McpToolRequestStatus;
+  resultPreview?: string;
+  error?: string;
+  completedAt?: number;
+}
+
+export interface AgentExecutionTrace {
+  id: string;
+  startedAt: number;
+  completedAt: number;
+  llm: {
+    provider: "remote-ai" | "local-fallback";
+    model?: string;
+  };
+  mcp: {
+    servers: string[];
+    availableTools: string[];
+    invokedTools: string[];
+    requests?: McpToolRequest[];
+  };
+  skills: {
+    available: string[];
+    activated: string[];
+  };
+  warnings: string[];
+}
+
+export type GraphProposalOperation =
+  | { type: "create-node"; node: KnowledgeNode }
+  | { type: "create-relation"; relation: KnowledgeRelation };
+
+export interface GraphChangeProposal {
+  id: string;
+  title: string;
+  summary: string;
+  sourceDraftId: string;
+  status: "draft" | "applied" | "rejected";
+  operations: GraphProposalOperation[];
+  trace: AgentExecutionTrace;
+  createdAt: number;
+  appliedAt?: number;
+  rejectedAt?: number;
+}
+
 export interface PaperBridgeStep {
   id: string;
   nodeId?: string;
@@ -204,6 +257,7 @@ export interface PaperBridgeDraft {
   confidence: number;
   provider: "remote-ai" | "local-fallback";
   diagnostic?: string;
+  agentTrace?: AgentExecutionTrace;
   status: "draft" | "adopted" | "dismissed";
   createdAt: number;
 }
@@ -217,6 +271,7 @@ export interface VaultSnapshot {
   argumentRoles: ArgumentRoleAssignment[];
   migrationRecords: MigrationRecord[];
   paperDrafts: PaperBridgeDraft[];
+  graphProposals: GraphChangeProposal[];
 }
 
 export const emptyVaultSnapshot: VaultSnapshot = {
@@ -228,6 +283,7 @@ export const emptyVaultSnapshot: VaultSnapshot = {
   argumentRoles: [],
   migrationRecords: [],
   paperDrafts: [],
+  graphProposals: [],
 };
 
 export const demoVaultSnapshot: VaultSnapshot = {
@@ -479,4 +535,5 @@ export const demoVaultSnapshot: VaultSnapshot = {
   ],
   migrationRecords: [],
   paperDrafts: [],
+  graphProposals: [],
 };

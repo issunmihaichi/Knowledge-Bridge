@@ -1,8 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { createGraphChangeProposal } from "./graphProposal";
 import { demoVaultSnapshot, type VaultSnapshot } from "./model";
-import { GraphLedger } from "./ledger";
+import { draftPaperBridgeLocally } from "./paperBridgeAi";
+import { GraphLedger, resolveSqlWasmPath } from "./ledger";
 
 describe("Knowledge Bridge graph ledger", () => {
+  it("resolves Vite file-system URLs on Windows without prefixing the app directory", () => {
+    expect(resolveSqlWasmPath("/@fs/C:/Knowledge%20Bridge/sql-wasm.wasm", "C:/Knowledge Bridge/app")).toBe(
+      "C:/Knowledge Bridge/sql-wasm.wasm",
+    );
+  });
+
   it("can restore a ledger written through a Vault persistence callback", async () => {
     const written: Uint8Array[] = [];
     const ledger = await GraphLedger.open(
@@ -27,15 +35,23 @@ describe("Knowledge Bridge graph ledger", () => {
       persisted.push(bytes);
     });
     const initial = structuredClone(demoVaultSnapshot);
+    const proposal = createGraphChangeProposal(
+      draftPaperBridgeLocally("A frontier concept", initial, 1),
+      initial,
+      2,
+      "ledger-proposal",
+    );
     const changed: VaultSnapshot = {
       ...structuredClone(initial),
       pending: [],
       protocols: initial.protocols.map((protocol) => ({ ...protocol, status: "gap" })),
+      graphProposals: [proposal],
     };
 
     ledger.save(initial, "initial");
     ledger.save(changed, "change");
     expect(ledger.load()).toEqual(changed);
+    expect(ledger.load().graphProposals).toEqual([proposal]);
     expect(ledger.undo()).toEqual(initial);
     expect(ledger.load()).toEqual(initial);
     expect(persisted.length).toBeGreaterThan(0);

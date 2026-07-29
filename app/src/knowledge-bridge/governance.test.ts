@@ -85,6 +85,7 @@ function snapshot(): VaultSnapshot {
     argumentRoles: [],
     migrationRecords: [],
     paperDrafts: [],
+    graphProposals: [],
   };
 }
 

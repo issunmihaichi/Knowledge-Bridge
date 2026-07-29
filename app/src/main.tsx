@@ -44,9 +44,6 @@ if (import.meta.env.DEV && isMobile) {
 
 const el = document.getElementById("root")!;
 
-// 建议挂载根节点前的一系列操作统一写成函数，
-// 在这里看着清爽一些，像一个列表清单一样。也方便调整顺序
-
 (async () => {
   const matches = !isWeb && isDesktop ? await getMatches() : null;
   const isCliMode = isDesktop && matches?.args.output?.occurrences === 1;
@@ -59,7 +56,6 @@ const el = document.getElementById("root")!;
     QuickSettingsManager.init(),
     isWeb ? Promise.resolve() : ExtensionManager.init(),
   ]);
-  // 这些东西依赖上面的东西，所以单独一个Promise.all
   const languageLoad = loadLanguageFiles();
   await Promise.all([isWeb ? Promise.resolve() : languageLoad, loadSyncModules(), initAuth()]);
   if (isWeb) {
@@ -83,14 +79,11 @@ const el = document.getElementById("root")!;
   console.error("Knowledge Bridge startup failed", error);
 });
 
-/** 加载同步初始化的模块 */
 async function loadSyncModules() {
   EdgeCollisionBoxGetter.init();
-  // SoundService.init();
   MouseLocation.init();
 }
 
-/** 初始化认证状态：从持久化存储中恢复 session */
 async function initAuth() {
   if (!authClient) {
     store.set(isAuthLoadingAtom, false);
@@ -99,67 +92,53 @@ async function initAuth() {
   try {
     const session = await UserState.getSession();
     if (session?.token) {
-      // 验证 session 是否仍然有效
       const { data } = await authClient.getSession();
       if (data?.user) {
         store.set(currentUserAtom, data.user as AuthUser);
       } else {
-        // token 失效，清理本地存储
         await UserState.clearSession();
       }
     }
   } catch {
-    // 网络错误等不影响启动，清理本地 session 即可
     await UserState.clearSession();
   } finally {
     store.set(isAuthLoadingAtom, false);
   }
 }
 
-/** 加载语言文件 */
 async function loadLanguageFiles() {
   i18next.use(initReactI18next).init({
     lng: Settings.language,
-    // debug会影响性能，并且没什么用，所以关掉
-    // debug: import.meta.env.DEV,
     debug: false,
     defaultNS: "",
     fallbackLng: false,
     saveMissing: false,
     resources: {
-      en: await import("./locales/en.yml").then((m) => m.default),
-      zh_CN: await import("./locales/zh_CN.yml").then((m) => m.default),
-      zh_TW: await import("./locales/zh_TW.yml").then((m) => m.default),
-      zh_TWC: await import("./locales/zh_TWC.yml").then((m) => m.default),
-      id: await import("./locales/id.yml").then((m) => m.default),
+      en: await import("./locales/en.yml").then((module) => module.default),
+      zh_CN: await import("./locales/zh_CN.yml").then((module) => module.default),
+      zh_TW: await import("./locales/zh_TW.yml").then((module) => module.default),
+      zh_TWC: await import("./locales/zh_TWC.yml").then((module) => module.default),
+      id: await import("./locales/id.yml").then((module) => module.default),
     },
   });
 }
 
-/** 渲染应用 */
-async function renderApp(cli: boolean = false) {
+async function renderApp(cli = false) {
   const root = createRoot(el);
   if (cli) {
     await getCurrentWindow().hide();
     await getCurrentWindow().setSkipTaskbar(true);
     root.render(<></>);
-  } else {
-    // if (isMobile) {
-    //   document.querySelector<HTMLMetaElement>("meta[name=viewport]")!.content =
-    //     "width=device-width, initial-scale=0.5, maximum-scale=0.5, user-scalable=yes, interactive-widget=overlays-content";
-    //   document.documentElement.style.transform = "scale(0.5)";
-    //   document.documentElement.style.transformOrigin = "top left";
-    //   document.documentElement.style.overflow = "hidden";
-    // }
-    root.render(
-      <Provider store={store}>
-        <Toaster richColors visibleToasts={5} expand />
-        <ErrorBoundary FallbackComponent={Fallback}>
-          <App />
-        </ErrorBoundary>
-      </Provider>,
-    );
+    return;
   }
+  root.render(
+    <Provider store={store}>
+      <Toaster richColors visibleToasts={5} expand />
+      <ErrorBoundary FallbackComponent={Fallback}>
+        <App />
+      </ErrorBoundary>
+    </Provider>,
+  );
 }
 
 async function loadStartFile() {
@@ -171,19 +150,18 @@ async function loadStartFile() {
     if (isProjectGraphDeepLink(argPath)) {
       try {
         await handleDeepLink([argPath]);
-      } catch (e) {
-        toast.error("处理 Deep Link 失败: " + String(e));
+      } catch (error) {
+        toast.error("处理 Deep Link 失败: " + String(error));
       }
     } else {
       try {
-        const isExists = await exists(argPath);
-        if (isExists) {
+        if (await exists(argPath)) {
           await onOpenFile(URI.file(argPath), "CLI或双击文件");
         } else {
           toast.error("文件不存在");
         }
-      } catch (e) {
-        toast.error("打开文件失败: " + String(e));
+      } catch (error) {
+        toast.error("打开文件失败: " + String(error));
       }
     }
   }
@@ -191,8 +169,7 @@ async function loadStartFile() {
   const pending = await invoke<string[]>("take_pending_open_files");
   for (const path of pending) {
     if (!path.toLowerCase().endsWith(".prg")) continue;
-    const isExists = await exists(path);
-    if (isExists) {
+    if (await exists(path)) {
       await onOpenFile(URI.file(path), "macOS双击文件(启动)");
     } else {
       toast.error("文件不存在");
@@ -201,25 +178,22 @@ async function loadStartFile() {
 
   listen<string>("open-file-from-os", async (event) => {
     const path = event.payload;
-    const isExists = await exists(path);
-    if (isExists) {
+    if (await exists(path)) {
       await onOpenFile(URI.file(path), "macOS双击文件");
     } else {
       toast.error("文件不存在");
     }
   });
 
-  // Deep link: 冷启动（应用通过 URL 唤起）
   try {
     const urls = await getCurrent();
     if (urls && urls.length > 0) {
       await handleDeepLink(urls);
     }
-  } catch (e) {
-    toast.error("处理 Deep Link 失败: " + String(e));
+  } catch (error) {
+    toast.error("处理 Deep Link 失败: " + String(error));
   }
 
-  // Deep link: 热启动（应用已运行时收到 URL）
   onOpenUrl((urls) => {
     if (urls.length > 0) {
       void handleDeepLink(urls);
@@ -227,7 +201,6 @@ async function loadStartFile() {
   });
 }
 
-/** 无外部文件时创建空草稿并弹出欢迎窗（类 Blender splash） */
 async function ensureStartupDraftAndWelcome() {
   if (store.get(tabsAtom).length > 0) return;
   await onNewDraft();

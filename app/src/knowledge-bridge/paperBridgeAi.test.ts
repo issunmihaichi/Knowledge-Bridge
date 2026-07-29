@@ -17,11 +17,7 @@ describe("source bridge drafting", () => {
     );
     expect(draft.provider).toBe("local-fallback");
     expect(draft.status).toBe("draft");
-    expect(draft.chain.map((step) => step.role)).toEqual([
-      "frontier-concept",
-      "bridge-mechanism",
-      "learning-anchor",
-    ]);
+    expect(draft.chain.map((step) => step.role)).toEqual(["frontier-concept", "bridge-mechanism", "learning-anchor"]);
     expect(draft.chain.at(-1)?.nodeId).toBe("l1-cell");
   });
 
@@ -73,14 +69,77 @@ describe("source bridge drafting", () => {
     });
 
     expect(draft.provider).toBe("remote-ai");
-    expect(draft.chain.map((step) => step.role)).toEqual([
-      "frontier-concept",
-      "bridge-mechanism",
-      "learning-anchor",
-    ]);
+    expect(draft.chain.map((step) => step.role)).toEqual(["frontier-concept", "bridge-mechanism", "learning-anchor"]);
     expect(fetchMock).toHaveBeenCalledWith(
       "https://example.test/v1/chat/completions",
       expect.objectContaining({ headers: expect.objectContaining({ Authorization: "Bearer test-key" }) }),
     );
+  });
+
+  it("keeps valid MCP calls as approval requests instead of claiming they ran", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  title: "A frontier paper",
+                  summary: "A provisional learning chain",
+                  anchorReason: "The cell anchor is user-confirmed",
+                  confidence: 0.7,
+                  chain: [
+                    { role: "frontier-concept", title: "New mechanism", explanation: "Needs source context" },
+                    { role: "bridge-mechanism", title: "Information flow", explanation: "Connects the levels" },
+                    {
+                      role: "learning-anchor",
+                      nodeId: "l1-cell",
+                      title: "Cell and heredity",
+                      explanation: "Audited anchor",
+                    },
+                  ],
+                  mcpRequests: [
+                    {
+                      server: "papers",
+                      name: "lookup",
+                      arguments: { doi: "10.0000/example" },
+                      reason: "Check the paper metadata",
+                    },
+                    { server: "unknown", name: "unsafe", arguments: {}, reason: "Not in the catalog" },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const draft = await draftPaperBridge(
+      "A frontier paper",
+      structuredClone(demoVaultSnapshot),
+      100,
+      { endpoint: "https://example.test/v1", model: "test-model", apiKey: "" },
+      {
+        skills: [],
+        mcpTools: [
+          {
+            server: "papers",
+            name: "lookup",
+            modelName: "mcp__papers__lookup",
+            description: "Look up a paper",
+            inputSchema: { type: "object", properties: { doi: { type: "string" } } },
+          },
+        ],
+      },
+    );
+
+    expect(draft.plannedMcpRequests).toHaveLength(1);
+    expect(draft.plannedMcpRequests?.[0]).toMatchObject({
+      server: "papers",
+      tool: "lookup",
+      modelName: "mcp__papers__lookup",
+      status: "pending-approval",
+    });
   });
 });

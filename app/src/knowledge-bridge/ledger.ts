@@ -4,8 +4,15 @@ import type { KnowledgeRelation, ManagedLinkSnapshot, VaultSnapshot } from "./mo
 
 const DB_KEY = "knowledge-bridge.graph.db";
 
+export function resolveSqlWasmPath(url: string, currentDirectory: string): string {
+  const decoded = decodeURIComponent(url);
+  if (decoded.startsWith("/@fs/")) return decoded.slice("/@fs/".length);
+  if (decoded.startsWith("/")) return `${currentDirectory}${decoded}`;
+  return decoded;
+}
+
 function locateWasm(): string {
-  if (typeof window === "undefined" && wasmUrl.startsWith("/")) return `${process.cwd()}${wasmUrl}`;
+  if (typeof window === "undefined") return resolveSqlWasmPath(wasmUrl, process.cwd());
   return wasmUrl;
 }
 
@@ -42,6 +49,7 @@ function normalizeSnapshot(snapshot: VaultSnapshot): VaultSnapshot {
     argumentRoles: snapshot.argumentRoles ?? [],
     migrationRecords: snapshot.migrationRecords ?? [],
     paperDrafts: snapshot.paperDrafts ?? [],
+    graphProposals: snapshot.graphProposals ?? [],
   };
 }
 
@@ -59,7 +67,8 @@ export class GraphLedger {
     useBrowserCache = true,
   ): Promise<GraphLedger> {
     const SQL = await initSqlJs({ locateFile: locateWasm });
-    const stored = !bytes && useBrowserCache && typeof localStorage !== "undefined" ? localStorage.getItem(DB_KEY) : null;
+    const stored =
+      !bytes && useBrowserCache && typeof localStorage !== "undefined" ? localStorage.getItem(DB_KEY) : null;
     const initial =
       bytes ?? (stored ? Uint8Array.from(atob(stored), (character) => character.charCodeAt(0)) : undefined);
     const ledger = new GraphLedger(new SQL.Database(initial), externalPersist, useBrowserCache);
@@ -78,6 +87,7 @@ export class GraphLedger {
       CREATE TABLE IF NOT EXISTS argument_roles (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS migration_records (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS paper_drafts (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS graph_proposals (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, undone_at INTEGER);
       CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
@@ -106,7 +116,20 @@ export class GraphLedger {
     const paperDrafts = rows<{ payload: string }>(this.db, "SELECT payload FROM paper_drafts").map((row) =>
       JSON.parse(row.payload),
     );
-    return normalizeSnapshot({ nodes, relations, pending, protocols, lenses, argumentRoles, migrationRecords, paperDrafts });
+    const graphProposals = rows<{ payload: string }>(this.db, "SELECT payload FROM graph_proposals").map((row) =>
+      JSON.parse(row.payload),
+    );
+    return normalizeSnapshot({
+      nodes,
+      relations,
+      pending,
+      protocols,
+      lenses,
+      argumentRoles,
+      migrationRecords,
+      paperDrafts,
+      graphProposals,
+    });
   }
 
   save(snapshot: VaultSnapshot, kind = "graph-save") {
@@ -115,7 +138,7 @@ export class GraphLedger {
     this.db.run("BEGIN");
     try {
       this.db.run(
-        "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts;",
+        "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts; DELETE FROM graph_proposals;",
       );
       for (const node of snapshot.nodes)
         this.db.run("INSERT INTO nodes VALUES (?, ?)", [node.id, JSON.stringify(node)]);
@@ -133,6 +156,8 @@ export class GraphLedger {
         this.db.run("INSERT INTO migration_records VALUES (?, ?)", [record.id, JSON.stringify(record)]);
       for (const draft of snapshot.paperDrafts)
         this.db.run("INSERT INTO paper_drafts VALUES (?, ?)", [draft.id, JSON.stringify(draft)]);
+      for (const proposal of snapshot.graphProposals)
+        this.db.run("INSERT INTO graph_proposals VALUES (?, ?)", [proposal.id, JSON.stringify(proposal)]);
       this.db.run("INSERT INTO transactions(kind, payload, created_at) VALUES (?, ?, ?)", [
         kind,
         JSON.stringify({ before, after: snapshot }),
@@ -181,7 +206,7 @@ export class GraphLedger {
   private replace(snapshot: VaultSnapshot) {
     snapshot = normalizeSnapshot(snapshot);
     this.db.run(
-      "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts;",
+      "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts; DELETE FROM graph_proposals;",
     );
     for (const node of snapshot.nodes) this.db.run("INSERT INTO nodes VALUES (?, ?)", [node.id, JSON.stringify(node)]);
     for (const relation of snapshot.relations)
@@ -198,6 +223,8 @@ export class GraphLedger {
       this.db.run("INSERT INTO migration_records VALUES (?, ?)", [record.id, JSON.stringify(record)]);
     for (const draft of snapshot.paperDrafts)
       this.db.run("INSERT INTO paper_drafts VALUES (?, ?)", [draft.id, JSON.stringify(draft)]);
+    for (const proposal of snapshot.graphProposals)
+      this.db.run("INSERT INTO graph_proposals VALUES (?, ?)", [proposal.id, JSON.stringify(proposal)]);
   }
 
   private flush() {

@@ -3612,6 +3612,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "knowledge-bridge"
+version = "0.1.0"
+dependencies = [
+ "aha",
+ "base64 0.22.1",
+ "regex",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-cli",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-deep-link",
+ "tauri-plugin-devtools",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-global-shortcut",
+ "tauri-plugin-http",
+ "tauri-plugin-os",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-store",
+ "tauri-plugin-system-info",
+ "tauri-plugin-updater",
+ "tauri-plugin-window-state",
+ "tauri-runtime-cef",
+ "tokio",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5104,37 +5135,6 @@ checksum = "4488a4a36b9a4ba6b9334a32a39971f77c1436ec82c38707bce707699cc3bbcb"
 dependencies = [
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "project-graph"
-version = "0.1.0"
-dependencies = [
- "aha",
- "base64 0.22.1",
- "regex",
- "rmcp",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-cli",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-deep-link",
- "tauri-plugin-devtools",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-global-shortcut",
- "tauri-plugin-http",
- "tauri-plugin-os",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-store",
- "tauri-plugin-system-info",
- "tauri-plugin-updater",
- "tauri-plugin-window-state",
- "tauri-runtime-cef",
- "tokio",
 ]
 
 [[package]]

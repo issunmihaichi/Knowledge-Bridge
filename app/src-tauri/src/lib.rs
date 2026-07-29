@@ -69,12 +69,6 @@ pub fn run() {
             #[cfg(debug_assertions)]
             app.handle().plugin(tauri_plugin_devtools::init())?;
 
-            // The bundled window starts hidden to avoid a white flash. It must
-            // be shown in release builds too, not only while running `tauri dev`.
-            if let Some(window) = app.handle().get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
             #[cfg(desktop)]
             {
                 app.handle().plugin(tauri_plugin_cli::init())?;
@@ -86,6 +80,17 @@ pub fn run() {
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle()
                     .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+            }
+
+            // Window-state restoration can leave a previously transparent
+            // host off-screen. Normalize the product window after all plugins
+            // initialize, then reveal the usable Knowledge Bridge workspace.
+            if let Some(window) = app.handle().get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.set_size(tauri::LogicalSize::new(1200.0, 800.0));
+                let _ = window.center();
+                let _ = window.show();
+                let _ = window.set_focus();
             }
             Ok(())
         })
