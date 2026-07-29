@@ -2,7 +2,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { DEFAULT_SUB_WINDOW_OPEN_MODES, subWindowOpenModesSchema } from "@/core/subWindowOpenModes";
 import { isMac } from "@/utils/platform";
 import { createStore } from "@/utils/store";
-import { DEFAULT_THEME_SETTINGS } from "@/core/service/themeDefaults";
+import { DEFAULT_THEME_SETTINGS, resolveStartupThemeSettings } from "@/core/service/themeDefaults";
 import i18next from "i18next";
 import { useEffect, useState } from "react";
 import z from "zod";
@@ -961,6 +961,24 @@ for (const [rawKey, rawValue] of Object.entries(rawSettings)) {
   console.error(`设置项 ${rawKey} 格式错误，将使用默认值`, result.error);
   pendingSettingsLoadErrorKeys.add(rawKey);
   pendingSettingsLoadErrorValues.set(rawKey, rawValue);
+}
+
+const startupThemeSettings = resolveStartupThemeSettings({
+  theme: savedSettings.theme,
+  themeMode:
+    Object.prototype.hasOwnProperty.call(rawSettings, "themeMode") && !pendingSettingsLoadErrorKeys.has("themeMode")
+      ? savedSettings.themeMode
+      : undefined,
+  lightTheme: savedSettings.lightTheme,
+  darkTheme: savedSettings.darkTheme,
+});
+savedSettings.theme = startupThemeSettings.theme;
+savedSettings.themeMode = startupThemeSettings.themeMode;
+
+if (rawSettings.theme !== startupThemeSettings.theme || rawSettings.themeMode !== startupThemeSettings.themeMode) {
+  await store.set("theme", startupThemeSettings.theme);
+  await store.set("themeMode", startupThemeSettings.themeMode);
+  await store.save();
 }
 
 // 检查菜单配置中是否存在指定 id 的节点（用于版本升级时的配置重置判断）
