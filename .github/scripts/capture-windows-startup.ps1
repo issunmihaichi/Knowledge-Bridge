@@ -44,19 +44,30 @@ public static class WindowCapture {
 }
 "@
 
+  $rect = New-Object WindowRect
+  $width = 0
+  $height = 0
+  for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    if ([WindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) {
+      $width = $rect.Right - $rect.Left
+      $height = $rect.Bottom - $rect.Top
+      if ($width -ge 640 -and $height -ge 480) {
+        break
+      }
+    }
+    Start-Sleep -Seconds 1
+    $process.Refresh()
+    if ($process.HasExited) {
+      throw "Knowledge Bridge exited before its main window reached a visible size."
+    }
+  }
+
+  if ($width -lt 640 -or $height -lt 480) {
+    throw "Knowledge Bridge remained hidden at ${width}x${height} after startup."
+  }
+
   [WindowCapture]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
   Start-Sleep -Seconds 2
-
-  $rect = New-Object WindowRect
-  if (-not [WindowCapture]::GetWindowRect($process.MainWindowHandle, [ref]$rect)) {
-    throw "Unable to read the Knowledge Bridge window bounds."
-  }
-
-  $width = $rect.Right - $rect.Left
-  $height = $rect.Bottom - $rect.Top
-  if ($width -lt 640 -or $height -lt 480) {
-    throw "Unexpected startup window size: ${width}x${height}."
-  }
 
   $bitmap = New-Object System.Drawing.Bitmap($width, $height)
   $graphics = [System.Drawing.Graphics]::FromImage($bitmap)

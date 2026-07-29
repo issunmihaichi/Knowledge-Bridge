@@ -47,6 +47,14 @@ jobs:
           # signing requires a TAURI_SIGNING_PRIVATE_KEY GitHub secret.
           TAURI_BUILD_ARGS: --bundles nsis --no-sign
 
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Knowledge-Bridge-windows-nsis
+          path: app/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Capture desktop startup preview
         shell: powershell
         run: ./.github/scripts/capture-windows-startup.ps1
@@ -58,12 +66,4 @@ jobs:
           name: Knowledge-Bridge-startup-preview
           path: artifacts/knowledge-bridge-startup.png
           if-no-files-found: warn
-          retention-days: 30
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: Knowledge-Bridge-windows-nsis
-          path: app/src-tauri/target/release/bundle/nsis/*.exe
-          if-no-files-found: error
           retention-days: 30
