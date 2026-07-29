@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$executable = (Resolve-Path "app/src-tauri/target/release/Knowledge Bridge.exe").Path
+$executable = (Resolve-Path "app/src-tauri/target/release/knowledge-bridge.exe").Path
 $outputDirectory = Join-Path $env:GITHUB_WORKSPACE "artifacts"
 $outputPath = Join-Path $outputDirectory "knowledge-bridge-startup.png"
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
