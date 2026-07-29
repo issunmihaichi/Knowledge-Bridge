@@ -1,8 +1,14 @@
 import { aiRequestHeaders, loadAiConnection, type AiConnectionSettings } from "./aiSettings";
+import { fetchAi } from "./aiHttp";
 import type { KnowledgeNode } from "./model";
 
 export interface BridgeSuggestion {
   bridgeId: string;
+  bridgeTitle: string;
+  bridgeDefinition?: string;
+  bridgeScope?: string;
+  bridgeBoundary?: string;
+  isNewBridge: boolean;
   reason: string;
   confidence: number;
   alternatives: Array<{ id: string; reason: string }>;
@@ -11,6 +17,7 @@ export interface BridgeSuggestion {
   anchorEvidence: string[];
   anchorAlternatives: Array<{ id: string; reason: string; confidence: number }>;
   provider: "remote-ai" | "local-fallback";
+  diagnostic?: string;
 }
 
 function localSuggestion(selected: KnowledgeNode, nodes: KnowledgeNode[]): BridgeSuggestion | undefined {
@@ -45,6 +52,11 @@ function localSuggestion(selected: KnowledgeNode, nodes: KnowledgeNode[]): Bridg
     .sort((left, right) => right.score - left.score);
   return {
     bridgeId: ranked[0].node.id,
+    bridgeTitle: ranked[0].node.title,
+    bridgeDefinition: ranked[0].node.definition,
+    bridgeScope: ranked[0].node.scope,
+    bridgeBoundary: ranked[0].node.boundary,
+    isNewBridge: false,
     reason: "本地候选：基于已复核 L2、正文词汇重合和当前学习角色；尚未调用远程模型。",
     confidence: ranked[0].score,
     alternatives: ranked.slice(1, 3).map(({ node }) => ({ id: node.id, reason: "同为当前知识库中的正式可复用机制" })),
@@ -62,16 +74,21 @@ export async function suggestBridge(
   selected: KnowledgeNode,
   nodes: KnowledgeNode[],
   connection: AiConnectionSettings = loadAiConnection(),
-): Promise<BridgeSuggestion | undefined> {
-  if (!connection.endpoint) return localSuggestion(selected, nodes);
+): Promise<BridgeSuggestion> {
+  if (!connection.endpoint) {
+    const local = localSuggestion(selected, nodes);
+    if (local) return local;
+    throw new Error("当前没有可复用的正式 L2。请先配置远程 AI，让它草拟一个新的桥梁机制候选。");
+  }
   try {
     const candidates = nodes
       .filter((node) => node.role === "L2" && node.status === "formal")
-      .map(({ id, title, content, definition, boundary }) => ({
+      .map(({ id, title, content, definition, scope, boundary }) => ({
         id,
         title,
         content: content.slice(0, 500),
         definition,
+        scope,
         boundary,
       }));
     const anchors = nodes
@@ -83,7 +100,7 @@ export async function suggestBridge(
           node.sourceKind !== "denied",
       )
       .map(({ id, title, anchorLedger }) => ({ id, title, anchorLedger }));
-    const response = await fetch(`${connection.endpoint}/chat/completions`, {
+    const response = await fetchAi(`${connection.endpoint}/chat/completions`, {
       method: "POST",
       headers: aiRequestHeaders(connection),
       body: JSON.stringify({
@@ -93,22 +110,41 @@ export async function suggestBridge(
           {
             role: "system",
             content:
-              "Select a reusable bridge mechanism and a traceable L1 anchor. Return JSON with bridgeId, reason, confidence, alternatives, anchorId, anchorReason, anchorEvidence, anchorAlternatives. Never invent IDs. This is a draft only, never claim a formal fact.",
+              "Select a reusable bridge mechanism and a traceable L1 anchor. Prefer an existing candidate and return its exact bridgeId. If no existing mechanism is suitable, set bridgeId to null and propose a specific bridgeTitle, bridgeDefinition, bridgeScope, and bridgeBoundary. Return JSON with bridgeId, bridgeTitle, bridgeDefinition, bridgeScope, bridgeBoundary, reason, confidence, alternatives, anchorId, anchorReason, anchorEvidence, anchorAlternatives. Never invent IDs. A proposed mechanism is only a candidate, never formal knowledge.",
           },
           { role: "user", content: JSON.stringify({ selected, candidates, anchors }) },
         ],
       }),
     });
     if (!response.ok) throw new Error(`AI request failed: ${response.status}`);
-    const parsed = JSON.parse((await response.json()).choices[0].message.content);
-    if (!candidates.some((candidate) => candidate.id === parsed.bridgeId))
-      throw new Error("AI returned an unknown bridge");
+    const responseBody = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const content = responseBody.choices?.[0]?.message?.content;
+    if (!content) throw new Error("AI returned an empty response");
+    const parsed = JSON.parse(
+      content
+        .trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/, ""),
+    );
+    const existingBridge = candidates.find((candidate) => candidate.id === parsed.bridgeId);
+    const proposedTitle = typeof parsed.bridgeTitle === "string" ? parsed.bridgeTitle.trim() : "";
+    if (!existingBridge && !proposedTitle) throw new Error("AI did not return a valid bridge mechanism");
     if (parsed.anchorId && !anchors.some((anchor) => anchor.id === parsed.anchorId))
       throw new Error("AI returned an unknown anchor");
     const alternativeIds = new Set(candidates.map((candidate) => candidate.id));
     const anchorIds = new Set(anchors.map((anchor) => anchor.id));
     return {
-      bridgeId: parsed.bridgeId,
+      bridgeId: existingBridge?.id ?? `proposed-l2:${crypto.randomUUID()}`,
+      bridgeTitle: existingBridge?.title ?? proposedTitle,
+      bridgeDefinition:
+        existingBridge?.definition ??
+        (typeof parsed.bridgeDefinition === "string" ? parsed.bridgeDefinition.trim() : undefined),
+      bridgeScope:
+        existingBridge?.scope ?? (typeof parsed.bridgeScope === "string" ? parsed.bridgeScope.trim() : undefined),
+      bridgeBoundary:
+        existingBridge?.boundary ??
+        (typeof parsed.bridgeBoundary === "string" ? parsed.bridgeBoundary.trim() : undefined),
+      isNewBridge: !existingBridge,
       reason: typeof parsed.reason === "string" ? parsed.reason : "AI 未提供桥梁理由。",
       confidence: typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5,
       alternatives: Array.isArray(parsed.alternatives)
@@ -139,7 +175,15 @@ export async function suggestBridge(
         : [],
       provider: "remote-ai",
     };
-  } catch {
-    return localSuggestion(selected, nodes);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const local = localSuggestion(selected, nodes);
+    if (local) {
+      return {
+        ...local,
+        diagnostic: `远程 AI 未完成请求（${reason}），当前显示的是本地复用候选。`,
+      };
+    }
+    throw new Error(`远程 AI 未完成请求：${reason}`, { cause: error });
   }
 }

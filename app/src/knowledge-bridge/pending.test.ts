@@ -168,4 +168,52 @@ describe("pending resolution", () => {
     expect(next.relations.some((relation) => relation.layer === "logical")).toBe(false);
     expect(next.pending.some((item) => item.id === "ai-bridge")).toBe(false);
   });
+
+  it("creates a pending L2 with the AI-proposed definition and boundary", () => {
+    const current = snapshot();
+    current.nodes.push({
+      id: "frontier-new",
+      title: "Spatial transcriptomics",
+      role: "L3",
+      status: "pending",
+      content: "A new concept",
+      x: 300,
+      y: 0,
+    });
+    current.pending.push({
+      id: "ai-new-bridge",
+      filePath: "ai://remote-ai/bridge/frontier-new",
+      sourceId: "frontier-new",
+      targetTitle: "Spatially constrained regulation",
+      kind: "ai-bridge",
+      raw: "Local context constrains expression.",
+      suggestedRole: "L2",
+      definition: "Tissue position changes the regulatory context.",
+      scope: "Spatial omics",
+      boundary: "Association alone does not establish causality.",
+      candidates: [
+        {
+          id: "proposed-l2:one",
+          title: "Spatially constrained regulation",
+          reason: "Mechanism candidate",
+          confidence: 0.78,
+        },
+      ],
+    });
+
+    const next = applyPendingResolution(current, {
+      pendingId: "ai-new-bridge",
+      action: "accept",
+      newNodeId: "accepted-l2",
+      now: 20,
+    });
+
+    expect(next.nodes.find((node) => node.id === "accepted-l2")).toMatchObject({
+      role: "L2",
+      status: "pending",
+      definition: "Tissue position changes the regulatory context.",
+      scope: "Spatial omics",
+      boundary: "Association alone does not establish causality.",
+    });
+  });
 });

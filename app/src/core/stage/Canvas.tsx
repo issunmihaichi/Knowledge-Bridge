@@ -10,12 +10,40 @@ import { Vector } from "@graphif/data-structures";
 export class Canvas {
   ctx: CanvasRenderingContext2D;
   private resizeObserver?: ResizeObserver;
+  private capturedPointerId?: number;
+
+  private readonly capturePrimaryPointer = (event: PointerEvent) => {
+    if (!event.isPrimary || event.button !== 0) return;
+    try {
+      this.element.setPointerCapture(event.pointerId);
+      this.capturedPointerId = event.pointerId;
+    } catch {
+      this.capturedPointerId = undefined;
+    }
+  };
+
+  private readonly releasePrimaryPointer = (event: PointerEvent) => {
+    if (this.capturedPointerId !== event.pointerId) return;
+    try {
+      if (this.element.hasPointerCapture(event.pointerId)) this.element.releasePointerCapture(event.pointerId);
+    } finally {
+      this.capturedPointerId = undefined;
+    }
+  };
+
+  private readonly clearCapturedPointer = () => {
+    this.capturedPointerId = undefined;
+  };
 
   constructor(
     private readonly project: Project,
     public element: HTMLCanvasElement = document.createElement("canvas"),
   ) {
     element.tabIndex = -1;
+    element.addEventListener("pointerdown", this.capturePrimaryPointer);
+    element.addEventListener("pointerup", this.releasePrimaryPointer);
+    element.addEventListener("pointercancel", this.releasePrimaryPointer);
+    element.addEventListener("lostpointercapture", this.clearCapturedPointer);
     // 鼠标移动到画布上开始tick
     element.addEventListener("mousemove", () => {
       if (document.querySelector("[data-radix-popper-content-wrapper]")) {
@@ -123,6 +151,10 @@ export class Canvas {
 
   dispose() {
     this.resizeObserver?.disconnect();
+    this.element.removeEventListener("pointerdown", this.capturePrimaryPointer);
+    this.element.removeEventListener("pointerup", this.releasePrimaryPointer);
+    this.element.removeEventListener("pointercancel", this.releasePrimaryPointer);
+    this.element.removeEventListener("lostpointercapture", this.clearCapturedPointer);
     this.element.remove();
   }
 }

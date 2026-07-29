@@ -761,11 +761,15 @@ function BridgeSuggestions({
   );
   const [selectedNodeId, setSelectedNodeId] = useState(l3Nodes[0]?.id ?? "");
   const [suggestion, setSuggestion] = useState<BridgeSuggestion>();
+  const [suggestionError, setSuggestionError] = useState<string>();
   const [suggesting, setSuggesting] = useState(false);
   useEffect(() => {
     if (!l3Nodes.some((node) => node.id === selectedNodeId)) setSelectedNodeId(l3Nodes[0]?.id ?? "");
   }, [l3Nodes, selectedNodeId]);
-  useEffect(() => setSuggestion(undefined), [selectedNodeId]);
+  useEffect(() => {
+    setSuggestion(undefined);
+    setSuggestionError(undefined);
+  }, [selectedNodeId]);
   const preview = useMemo(
     () => (frozenL2 ? buildFrozenL2MigrationPreview(snapshot, frozenL2.id, 0) : undefined),
     [frozenL2?.id, snapshot],
@@ -815,10 +819,16 @@ function BridgeSuggestions({
     const selected = snapshot.nodes.find((node) => node.id === selectedNodeId);
     if (!selected) return;
     setSuggesting(true);
+    setSuggestion(undefined);
+    setSuggestionError(undefined);
     try {
-      setSuggestion(await suggestBridge(selected, snapshot.nodes, connection));
+      const next = await suggestBridge(selected, snapshot.nodes, connection);
+      setSuggestion(next);
+      if (next.diagnostic) toast.warning(next.diagnostic);
     } catch (error) {
-      toast.error(`桥梁建议生成失败：${String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      setSuggestionError(message);
+      toast.error(`桥梁建议生成失败：${message}`);
     } finally {
       setSuggesting(false);
     }
@@ -857,15 +867,36 @@ function BridgeSuggestions({
             {suggesting ? <LoaderCircle className="animate-spin" /> : <Sparkles />}
             {suggesting ? "正在比较机制" : "生成桥梁建议"}
           </Button>
+          {(suggestionError || suggestion?.diagnostic) && (
+            <div
+              className={
+                suggestionError
+                  ? "border-destructive/40 bg-destructive/10 text-destructive flex items-start gap-2 border px-2.5 py-2 text-[11px] leading-4"
+                  : "flex items-start gap-2 border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] leading-4 text-amber-700 dark:text-amber-300"
+              }
+              role="status"
+            >
+              <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
+              <span>{suggestionError ?? suggestion?.diagnostic}</span>
+            </div>
+          )}
           {suggestion && (
             <div className="space-y-2 border-t pt-2 text-xs">
               <div className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 truncate font-medium">
-                  L2 {snapshot.nodes.find((node) => node.id === suggestion.bridgeId)?.title ?? suggestion.bridgeId}
+                  L2 {snapshot.nodes.find((node) => node.id === suggestion.bridgeId)?.title ?? suggestion.bridgeTitle}
                 </span>
+                <Badge variant="outline">{suggestion.isNewBridge ? "新候选" : "复用"}</Badge>
                 <Badge variant="secondary">{Math.round(suggestion.confidence * 100)}%</Badge>
               </div>
               <div className="text-muted-foreground leading-5">{suggestion.reason}</div>
+              {suggestion.isNewBridge && (suggestion.bridgeDefinition || suggestion.bridgeBoundary) && (
+                <div className="bg-muted/30 space-y-1 border-l px-2 py-1.5 text-[11px] leading-4">
+                  {suggestion.bridgeDefinition && <div>定义：{suggestion.bridgeDefinition}</div>}
+                  {suggestion.bridgeScope && <div>范围：{suggestion.bridgeScope}</div>}
+                  {suggestion.bridgeBoundary && <div>边界：{suggestion.bridgeBoundary}</div>}
+                </div>
+              )}
               <div className="border-l pl-2">
                 <div className="font-medium">
                   L1 {snapshot.nodes.find((node) => node.id === suggestion.anchorId)?.title ?? "无可用锚点"}
@@ -1415,6 +1446,10 @@ export default function KnowledgeBridgeWindow({
         const persistCanvas = () => {
           if (cancelled) return;
           updateKnowledgeBridgeSemanticZoom(activeProject);
+          // Keep the canvas object under the pointer while dragging. Persisting
+          // coordinates mid-drag causes a React/ledger synchronization pass that
+          // can rebuild graph references before the pointer is released.
+          if (activeProject.controller.isMouseDown[0]) return;
           const backend = backendRef.current;
           if (!backend) return;
           const positionOperation = createCanvasPositionOperation(readKnowledgeBridgeCanvasPositions(activeProject));
@@ -1862,12 +1897,21 @@ export default function KnowledgeBridgeWindow({
     const bridge = current.nodes.find(
       (node) => node.id === suggestion.bridgeId && node.role === "L2" && node.status === "formal",
     );
-    if (!source || !bridge) {
+    if (!source || (!suggestion.isNewBridge && !bridge)) {
       toast.error("建议引用的知识节点已变化，请重新生成桥梁建议。");
       return;
     }
+    const bridgeId = bridge?.id ?? suggestion.bridgeId;
+    const bridgeTitle = bridge?.title ?? suggestion.bridgeTitle.trim();
+    if (!bridgeTitle) {
+      toast.error("AI 没有给出可识别的桥梁机制名称，请重新生成。");
+      return;
+    }
     const duplicate = current.pending.some(
-      (item) => item.kind === "ai-bridge" && item.sourceId === source.id && item.candidates?.[0]?.id === bridge.id,
+      (item) =>
+        item.kind === "ai-bridge" &&
+        item.sourceId === source.id &&
+        item.targetTitle.trim().toLocaleLowerCase() === bridgeTitle.toLocaleLowerCase(),
     );
     if (duplicate) {
       toast.message("这条桥梁建议已经在待整理区中。");
@@ -1893,18 +1937,21 @@ export default function KnowledgeBridgeWindow({
       id: `pending:ai-bridge:${crypto.randomUUID()}`,
       filePath: `ai://${suggestion.provider}/bridge/${source.id}`,
       sourceId: source.id,
-      targetTitle: bridge.title,
+      targetTitle: bridgeTitle,
       kind: "ai-bridge",
       raw: suggestion.reason,
       suggestedRole: "L2",
+      definition: suggestion.bridgeDefinition,
+      scope: suggestion.bridgeScope,
+      boundary: suggestion.bridgeBoundary,
       anchorId: suggestion.anchorId,
       anchorReason: suggestion.anchorReason,
       anchorEvidence: suggestion.anchorEvidence,
       anchorAlternatives: suggestion.anchorAlternatives,
       candidates: [
         {
-          id: bridge.id,
-          title: bridge.title,
+          id: bridgeId,
+          title: bridgeTitle,
           reason: suggestion.reason,
           confidence: suggestion.confidence,
         },

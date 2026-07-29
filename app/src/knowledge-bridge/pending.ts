@@ -51,6 +51,7 @@ function createTargetNode(
     content:
       item.kind === "ai-bridge" ? `用户采用的 AI 桥梁草案：${item.raw}` : `从 ${item.filePath} 捕获的待解析概念。`,
     ...(sourceMarkdown !== undefined ? { detailsMarkdown: sourceMarkdown } : {}),
+    ...(item.kind === "ai-bridge" ? { definition: item.definition, scope: item.scope, boundary: item.boundary } : {}),
     ...proposedPosition(snapshot, item.sourceId),
     ...(role === "L3" ? { l3Lifecycle: "captured" as const } : {}),
     ...(item.kind === "ai-bridge"

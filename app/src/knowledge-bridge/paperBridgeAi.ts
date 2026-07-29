@@ -1,4 +1,5 @@
 import { aiRequestHeaders, loadAiConnection, type AiConnectionSettings } from "./aiSettings";
+import { fetchAi } from "./aiHttp";
 import type { KnowledgeNode, McpToolRequest, PaperBridgeDraft, PaperBridgeStep, VaultSnapshot } from "./model";
 
 export interface PaperBridgeAgentSupport {
@@ -285,7 +286,7 @@ export async function draftPaperBridge(
       boundary,
     }));
   try {
-    const response = await fetch(`${connection.endpoint}/chat/completions`, {
+    const response = await fetchAi(`${connection.endpoint}/chat/completions`, {
       method: "POST",
       headers: aiRequestHeaders(connection),
       body: JSON.stringify({

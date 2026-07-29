@@ -121,6 +121,9 @@ export interface PendingMention {
   kind: "wikilink" | "orphan" | "lineage" | "ai-bridge" | "scale-gap" | "severed-link";
   raw: string;
   suggestedRole?: LearningRole;
+  definition?: string;
+  scope?: string;
+  boundary?: string;
   deferredAt?: number;
   anchorId?: string;
   anchorReason?: string;

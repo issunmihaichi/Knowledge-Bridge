@@ -19,7 +19,7 @@
         "url": "/index.html",
         "width": 1200,
         "height": 800,
-        "decorations": true,
+        "decorations": false,
         "transparent": false,
         "visible": false
       }
