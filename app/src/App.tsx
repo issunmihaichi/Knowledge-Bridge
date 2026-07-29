@@ -22,7 +22,7 @@ import {
   isWindowMaxsizedAtom,
   tabsAtom,
 } from "@/state";
-import WelcomeWindow from "@/sub/WelcomeWindow";
+import KnowledgeBridgeWelcomeWindow from "@/sub/KnowledgeBridgeWelcomeWindow";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -222,7 +222,7 @@ export default function App() {
     if (previousHadProject && !hasOpenProject) {
       void (async () => {
         await onNewDraft();
-        WelcomeWindow.open();
+        KnowledgeBridgeWelcomeWindow.open();
       })();
     }
   }, [tabs]);
@@ -235,46 +235,46 @@ export default function App() {
     if (!isWeb) {
       getCurrentWindow()
         .onCloseRequested(async (e) => {
-        e.preventDefault();
+          e.preventDefault();
 
-        // 检查是否有未保存的项目
-        const unsavedTabs = tabs.filter(
-          (tab): tab is Project =>
-            tab instanceof Project &&
-            (tab.projectState === ProjectState.Unsaved || tab.projectState === ProjectState.Stashed),
-        );
-
-        if (unsavedTabs.length > 0) {
-          // 弹出警告对话框
-          const response = await Dialog.buttons(
-            "检测到未保存文件",
-            `当前有 ${unsavedTabs.length} 个未保存的文件。直接关闭可能有文件被清空的风险，建议先手动保存文件。`,
-            [
-              { id: "cancel", label: "取消", variant: "ghost" },
-              { id: "continue", label: "继续关闭", variant: "destructive" },
-            ],
+          // 检查是否有未保存的项目
+          const unsavedTabs = tabs.filter(
+            (tab): tab is Project =>
+              tab instanceof Project &&
+              (tab.projectState === ProjectState.Unsaved || tab.projectState === ProjectState.Stashed),
           );
 
-          if (response === "cancel") {
-            // 用户选择取消关闭，返回
+          if (unsavedTabs.length > 0) {
+            // 弹出警告对话框
+            const response = await Dialog.buttons(
+              "检测到未保存文件",
+              `当前有 ${unsavedTabs.length} 个未保存的文件。直接关闭可能有文件被清空的风险，建议先手动保存文件。`,
+              [
+                { id: "cancel", label: "取消", variant: "ghost" },
+                { id: "continue", label: "继续关闭", variant: "destructive" },
+              ],
+            );
+
+            if (response === "cancel") {
+              // 用户选择取消关闭，返回
+              return;
+            }
+            // 用户选择继续关闭，执行原有关闭流程
+          }
+
+          try {
+            for (const tab of tabs) {
+              console.log("尝试关闭", tab);
+              await closeTab(tab);
+            }
+          } catch {
+            Telemetry.event("关闭应用提示是否保存文件选择了取消");
             return;
           }
-          // 用户选择继续关闭，执行原有关闭流程
-        }
-
-        try {
-          for (const tab of tabs) {
-            console.log("尝试关闭", tab);
-            await closeTab(tab);
-          }
-        } catch {
-          Telemetry.event("关闭应用提示是否保存文件选择了取消");
-          return;
-        }
-        Telemetry.event("关闭应用");
-        // 保存窗口位置
-        await saveWindowState(StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED);
-        await getCurrentWindow().destroy();
+          Telemetry.event("关闭应用");
+          // 保存窗口位置
+          await saveWindowState(StateFlags.SIZE | StateFlags.POSITION | StateFlags.MAXIMIZED);
+          await getCurrentWindow().destroy();
         })
         .then((it) => {
           unlisten1 = it;

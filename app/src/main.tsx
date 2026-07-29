@@ -33,7 +33,6 @@ import { ExtensionManager } from "./core/extension/ExtensionManager";
 import { handleDeepLink, isProjectGraphDeepLink } from "./core/service/dataFileService/DeepLinkHandler";
 import { onNewDraft, onOpenFile } from "./core/service/GlobalMenu";
 import { TabWorkspace } from "./core/TabWorkspace";
-import WelcomeWindow from "./sub/WelcomeWindow";
 import KnowledgeBridgeWelcomeWindow from "./sub/KnowledgeBridgeWelcomeWindow";
 import "./css/index.css";
 import Fallback from "./Fallback";
@@ -204,10 +203,6 @@ async function loadStartFile() {
 async function ensureStartupDraftAndWelcome() {
   if (store.get(tabsAtom).length > 0) return;
   await onNewDraft();
-  if (isWeb) {
-    TabWorkspace.synchronizeGroups();
-    KnowledgeBridgeWelcomeWindow.open();
-    return;
-  }
-  WelcomeWindow.open();
+  if (isWeb) TabWorkspace.synchronizeGroups();
+  KnowledgeBridgeWelcomeWindow.open();
 }
