@@ -2,6 +2,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { DEFAULT_SUB_WINDOW_OPEN_MODES, subWindowOpenModesSchema } from "@/core/subWindowOpenModes";
 import { isMac } from "@/utils/platform";
 import { createStore } from "@/utils/store";
+import { DEFAULT_THEME_SETTINGS } from "@/core/service/themeDefaults";
 import i18next from "i18next";
 import { useEffect, useState } from "react";
 import z from "zod";
@@ -272,10 +273,10 @@ export const settingsSchema = z.object({
   uiSwitchButtonOffSoundFile: z.string().default(""),
   githubToken: z.string().default(""),
   githubUser: z.string().default(""),
-  theme: z.string().default("dark-blue"),
-  themeMode: z.union([z.literal("light"), z.literal("dark")]).default("dark"),
-  lightTheme: z.string().default("morandi"),
-  darkTheme: z.string().default("dark"),
+  theme: z.string().default(DEFAULT_THEME_SETTINGS.theme),
+  themeMode: z.union([z.literal("light"), z.literal("dark")]).default(DEFAULT_THEME_SETTINGS.themeMode),
+  lightTheme: z.string().default(DEFAULT_THEME_SETTINGS.lightTheme),
+  darkTheme: z.string().default(DEFAULT_THEME_SETTINGS.darkTheme),
   telemetry: z.boolean().default(true),
   historyManagerMode: z.union([z.literal("memoryEfficient"), z.literal("timeEfficient")]).default("timeEfficient"),
   isStealthModeEnabled: z.boolean().default(false),

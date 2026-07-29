@@ -2009,7 +2009,7 @@ export default function KnowledgeBridgeWindow({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div className="bg-background text-foreground flex h-full min-h-0 flex-col">
       <HoverPreviewLayer preview={hoverPreview} snapshot={snapshot} />
       <div className="border-b px-3 py-3">
         <div className="flex items-center gap-2">

@@ -35,7 +35,7 @@ function KnowledgeBridgeWelcomeWindow({ tabId }: { tabId: string }) {
   };
 
   return (
-    <div className="flex h-full w-full overflow-auto p-5 sm:p-8">
+    <div className="bg-background text-foreground flex h-full w-full overflow-auto p-5 sm:p-8">
       <main className="m-auto w-full max-w-2xl">
         <header className="border-b pb-6">
           <div className="flex items-center gap-2">

@@ -194,7 +194,7 @@ export default function WelcomeWindow({ tabId }: { tabId: string }) {
   }
 
   return (
-    <div className="flex h-full w-full overflow-auto p-4">
+    <div className="bg-background text-foreground flex h-full w-full overflow-auto p-4">
       <div className="m-auto flex w-full max-w-3xl flex-col gap-6 sm:gap-8">
         <div className="flex flex-col sm:gap-2">
           <div className="flex items-center gap-2">
