@@ -1,9 +1,10 @@
 mod cmd;
 
 use std::sync::{Mutex, OnceLock};
-use tauri::{Emitter, Listener, Manager, State};
+use tauri::{Manager, State};
 
-// 这两行可能不能去掉，否则会导致linux打包软件报错
+// This import is required by the Linux-specific CEF setup below.
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 pub static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
@@ -66,11 +67,13 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             #[cfg(debug_assertions)]
-            {
-                app.handle().plugin(tauri_plugin_devtools::init())?;
-                if let Some(window) = app.handle().get_webview_window("main") {
-                    let _ = window.show();
-                }
+            app.handle().plugin(tauri_plugin_devtools::init())?;
+
+            // The bundled window starts hidden to avoid a white flash. It must
+            // be shown in release builds too, not only while running `tauri dev`.
+            if let Some(window) = app.handle().get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
             }
             #[cfg(desktop)]
             {
