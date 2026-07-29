@@ -1,6 +1,7 @@
 import type { VaultFile } from "./model";
 
 export const KNOWLEDGE_BRIDGE_LEDGER_PATH = ".knowledge-bridge/graph.db";
+const RECENT_VAULT_PATH_KEY = "knowledge-bridge.recent-vault-path";
 
 export interface VaultAdapter {
   readonly name: string;
@@ -36,7 +37,7 @@ async function resolveFile(root: FileSystemDirectoryHandle, path: string, create
   return directory.getFileHandle(parts.at(-1)!, { create });
 }
 
-function isTauriRuntime(): boolean {
+export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_OS_PLUGIN_INTERNALS__" in window;
 }
 
@@ -47,6 +48,9 @@ function vaultPathParts(path: string): string[] {
 export class TauriVaultAdapter implements VaultAdapter {
   constructor(private readonly root: string) {}
   readonly persistence = "vault" as const;
+  get rootPath(): string {
+    return this.root;
+  }
   get name(): string {
     return vaultPathParts(this.root).at(-1) ?? this.root;
   }
@@ -193,4 +197,24 @@ export async function pickVault(): Promise<VaultAdapter> {
   const picker = (window as Window & { showDirectoryPicker?: (options?: { mode: "readwrite" }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
   if (!picker) throw new Error("当前浏览器不支持本地文件夹访问，请使用 Chromium 浏览器。");
   return new BrowserVaultAdapter(await picker({ mode: "readwrite" }));
+}
+
+/** Remember only a desktop folder path; graph contents stay in the selected Vault. */
+export function rememberRecentVault(adapter: VaultAdapter): void {
+  if (!(adapter instanceof TauriVaultAdapter) || typeof localStorage === "undefined") return;
+  localStorage.setItem(RECENT_VAULT_PATH_KEY, adapter.rootPath);
+}
+
+/**
+ * Reopen the last desktop Vault when it still exists. Browser folders require
+ * a fresh permission grant, so browser mode keeps using its local ledger.
+ */
+export async function restoreRecentVault(): Promise<TauriVaultAdapter | undefined> {
+  if (!isTauriRuntime() || typeof localStorage === "undefined") return undefined;
+  const root = localStorage.getItem(RECENT_VAULT_PATH_KEY);
+  if (!root) return undefined;
+  const { exists } = await import("@tauri-apps/plugin-fs");
+  if (await exists(root)) return new TauriVaultAdapter(root);
+  localStorage.removeItem(RECENT_VAULT_PATH_KEY);
+  return undefined;
 }

@@ -31,6 +31,8 @@ import {
   DemoVaultAdapter,
   KNOWLEDGE_BRIDGE_LEDGER_PATH,
   pickVault,
+  rememberRecentVault,
+  restoreRecentVault,
   type VaultAdapter,
 } from "@/knowledge-bridge/vault";
 import { Vector } from "@graphif/data-structures";
@@ -93,6 +95,41 @@ function createStarterSnapshot(initialAnchor?: string): VaultSnapshot {
     ],
   });
   return snapshot;
+}
+
+/** Add a newly confirmed anchor without discarding the learner's existing ledger. */
+function appendInitialAnchor(snapshot: VaultSnapshot, initialAnchor?: string): VaultSnapshot {
+  const anchor = initialAnchor?.trim();
+  if (!anchor) return snapshot;
+  const normalized = anchor.toLocaleLowerCase();
+  if (snapshot.nodes.some((node) => node.role === "L1" && node.title.trim().toLocaleLowerCase() === normalized)) {
+    return snapshot;
+  }
+  const existingAnchors = snapshot.nodes.filter((node) => node.role === "L1").length;
+  return {
+    ...snapshot,
+    nodes: [
+      ...snapshot.nodes,
+      {
+        id: `welcome-anchor:${crypto.randomUUID()}`,
+        title: anchor,
+        role: "L1",
+        status: "formal",
+        content: "User-confirmed learning anchor added while resuming an existing knowledge ledger.",
+        x: -220,
+        y: existingAnchors * 120,
+        sourceKind: "user-confirmed",
+        anchorLedger: [
+          {
+            source: "user-confirmed",
+            rationale: "User confirmed this as prior knowledge before extending the existing knowledge ledger.",
+            evidence: ["Knowledge Bridge welcome input"],
+            recordedAt: Date.now(),
+          },
+        ],
+      },
+    ],
+  };
 }
 
 function hasSnapshotContent(snapshot: VaultSnapshot): boolean {
@@ -651,18 +688,44 @@ export default function KnowledgeBridgeWindow({
   useEffect(() => {
     let disposed = false;
     const epoch = ++ledgerEpochRef.current;
-    void GraphLedger.open()
-      .then((ledger) => {
+    void (async () => {
+      const recentVault = await restoreRecentVault();
+      if (disposed || epoch !== ledgerEpochRef.current) return;
+
+      if (recentVault) {
+        const bytes = await recentVault.readBinary(KNOWLEDGE_BRIDGE_LEDGER_PATH);
+        const ledger = await GraphLedger.open(
+          bytes && bytes.length > 0 ? bytes : undefined,
+          (nextBytes) => enqueueLedgerWrite(recentVault, nextBytes),
+          false,
+        );
         if (disposed || epoch !== ledgerEpochRef.current) return;
         ledgerRef.current = ledger;
         const saved = ledger.load();
-        if (hasSnapshotContent(saved) && !(freshStart && isBundledBiologyDemo(saved))) {
-          snapshotRef.current = saved;
-          setSnapshot(saved);
-        } else {
-          ledger.save(starterSnapshotRef.current, freshStart ? "welcome-start" : "initial-empty");
-        }
-      })
+        const next = hasSnapshotContent(saved) ? appendInitialAnchor(saved, initialAnchor) : starterSnapshotRef.current;
+        adapterRef.current = recentVault;
+        setVaultName(recentVault.name);
+        setPersistenceMode("vault");
+        snapshotRef.current = next;
+        setSnapshot(next);
+        if (next !== saved) ledger.save(next, hasSnapshotContent(saved) ? "resume-with-anchor" : "vault-create");
+        toast.message(`已恢复 ${recentVault.name}，新材料会基于已有锚点继续桥接。`);
+        return;
+      }
+
+      const ledger = await GraphLedger.open();
+      if (disposed || epoch !== ledgerEpochRef.current) return;
+      ledgerRef.current = ledger;
+      const saved = ledger.load();
+      if (hasSnapshotContent(saved) && !(freshStart && isBundledBiologyDemo(saved))) {
+        const next = appendInitialAnchor(saved, initialAnchor);
+        snapshotRef.current = next;
+        setSnapshot(next);
+        if (next !== saved) ledger.save(next, "resume-with-anchor");
+      } else {
+        ledger.save(starterSnapshotRef.current, freshStart ? "welcome-start" : "initial-empty");
+      }
+    })()
       .catch((error: unknown) => toast.error(`关系账本打开失败：${String(error)}`));
     return () => {
       disposed = true;
@@ -718,12 +781,15 @@ export default function KnowledgeBridgeWindow({
 
       adapterRef.current = adapter;
       ledgerRef.current = vaultLedger;
+      rememberRecentVault(adapter);
       setVaultName(adapter.name);
       setPersistenceMode("vault");
       const saved = vaultLedger.load();
       if (hasSnapshotContent(saved)) {
-        snapshotRef.current = saved;
-        setSnapshot(saved);
+        const next = appendInitialAnchor(saved, initialAnchor);
+        snapshotRef.current = next;
+        setSnapshot(next);
+        if (next !== saved) vaultLedger.save(next, "resume-with-anchor");
         toast.success(`已连接 ${adapter.name}，已载入其中的关系账本`);
       } else {
         vaultLedger.save(snapshotRef.current, "vault-create");
@@ -809,12 +875,12 @@ export default function KnowledgeBridgeWindow({
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-semibold">{vaultName} · Vault</div>
             <div className="text-muted-foreground mt-0.5 text-[11px]">
-              {vaultBacked ? ".knowledge-bridge/graph.db" : "浏览器暂存（连接 Vault 后写入 graph.db）"}
+              {vaultBacked ? ".knowledge-bridge/graph.db" : "本机持久账本（自动恢复；连接 Vault 后写入 graph.db）"}
             </div>
           </div>
           <Badge variant={scanning ? "secondary" : "outline"}>
             {scanning ? <LoaderCircle className="animate-spin" /> : <ShieldCheck />}
-            {scanning ? "索引中" : vaultBacked ? "已保存" : "暂存"}
+            {scanning ? "索引中" : "已保存"}
           </Badge>
         </div>
         <Progress value={progressValue} className="mt-3 h-1" />

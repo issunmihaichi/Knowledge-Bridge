@@ -9,11 +9,17 @@ function titleFromInput(input: string): string {
   return (line ?? "未命名材料").slice(0, 90);
 }
 
-function findAnchor(snapshot: VaultSnapshot): KnowledgeNode | undefined {
-  return (
-    snapshot.nodes.find((node) => node.role === "L1" && node.sourceKind === "user-confirmed") ??
-    snapshot.nodes.find((node) => node.role === "L1" && node.sourceKind !== "denied")
-  );
+function findAnchor(snapshot: VaultSnapshot, input: string): KnowledgeNode | undefined {
+  const normalized = input.toLocaleLowerCase();
+  return snapshot.nodes
+    .filter((node) => node.role === "L1" && node.sourceKind !== "denied")
+    .map((node) => {
+      const terms = `${node.title} ${node.content}`.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [];
+      const overlap = terms.filter((term) => normalized.includes(term)).length;
+      const sourceScore = node.sourceKind === "user-confirmed" ? 0.24 : node.sourceKind === "behavior" ? 0.12 : 0;
+      return { node, score: sourceScore + Math.min(overlap * 0.16, 0.64) };
+    })
+    .sort((left, right) => right.score - left.score)[0]?.node;
 }
 
 function findBridge(snapshot: VaultSnapshot, input: string): KnowledgeNode | undefined {
@@ -41,7 +47,7 @@ export function draftPaperBridgeLocally(
   now = Date.now(),
   diagnostic = "尚未连接 AI，以下为基于当前知识账本的本地草拟。",
 ): PaperBridgeDraft {
-  const anchor = findAnchor(snapshot);
+  const anchor = findAnchor(snapshot, input);
   const bridge = findBridge(snapshot, input);
   const frontier = findFrontierConcept(snapshot, input);
   const frontierTitle = frontier?.title ?? titleFromInput(input);
