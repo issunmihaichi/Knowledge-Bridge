@@ -22,6 +22,7 @@ export type CognitiveRelationKind =
   | "related";
 export type LogicalRelationOutcome = "compatible" | "conditional" | "conflicting";
 export type ArgumentRole = "source" | "premise" | "evidence" | "intermediate-conclusion" | "conclusion";
+export type BridgeStepKind = "mapping" | "mechanism" | "constraint" | "scale-transition";
 
 export interface AiProvenance {
   status: AiDraftStatus;
@@ -98,6 +99,8 @@ export interface KnowledgeRelation {
   context?: string;
   /** Stable identity shared by the two edges of one concrete L1-L2-L3 bridge path. */
   bridgePathId?: string;
+  /** A decomposed L2 module owns the visible path for this endpoint relation. */
+  bridgeModuleId?: string;
   confidence?: number;
   evidence?: EvidenceReading[];
   scaleProtocolId?: string;
@@ -124,6 +127,7 @@ export interface PendingMention {
   definition?: string;
   scope?: string;
   boundary?: string;
+  bridgeModule?: BridgeModuleDraft;
   deferredAt?: number;
   anchorId?: string;
   anchorReason?: string;
@@ -216,6 +220,47 @@ export interface MigrationRecord {
   undoneAt?: number;
 }
 
+/** One inspectable transformation inside an L2 bridge module. */
+export interface BridgeModuleStepDraft {
+  id: string;
+  title: string;
+  kind: BridgeStepKind;
+  explanation: string;
+  definition?: string;
+  boundary?: string;
+  evidence?: string[];
+}
+
+/** AI/user draft before it is positioned and adopted into the ledger. */
+export interface BridgeModuleDraft {
+  title: string;
+  definition?: string;
+  scope?: string;
+  boundary?: string;
+  steps: BridgeModuleStepDraft[];
+}
+
+export interface BridgeModuleStep extends BridgeModuleStepDraft {
+  x: number;
+  y: number;
+}
+
+/**
+ * L2 is a composite route, never just an intermediate label. Its child steps
+ * are the objects rendered on the canvas and carry the actual explanations.
+ */
+export interface BridgeModule extends Omit<BridgeModuleDraft, "steps"> {
+  id: string;
+  status: NodeStatus;
+  sourceId?: string;
+  targetId?: string;
+  x: number;
+  y: number;
+  collapsed: boolean;
+  steps: BridgeModuleStep[];
+  ai?: AiProvenance;
+}
+
 export type McpToolRequestStatus = "pending-approval" | "completed" | "failed" | "rejected";
 
 export interface McpToolRequest {
@@ -263,7 +308,8 @@ export interface KnowledgeGraphOperationMeta {
 
 export type GraphProposalOperation =
   | { type: "create-node"; node: KnowledgeNode }
-  | { type: "create-relation"; relation: KnowledgeRelation };
+  | { type: "create-relation"; relation: KnowledgeRelation }
+  | { type: "create-bridge-module"; module: BridgeModule };
 
 export interface GraphChangeProposal {
   id: string;
@@ -293,6 +339,7 @@ export interface PaperBridgeDraft {
   input: string;
   summary: string;
   chain: PaperBridgeStep[];
+  bridgeModule?: BridgeModuleDraft;
   anchorReason: string;
   confidence: number;
   provider: "remote-ai" | "local-fallback";
@@ -312,6 +359,8 @@ export interface VaultSnapshot {
   migrationRecords: MigrationRecord[];
   paperDrafts: PaperBridgeDraft[];
   graphProposals: GraphChangeProposal[];
+  /** Optional for compatibility with ledgers created before decomposed L2 modules. */
+  bridgeModules?: BridgeModule[];
 }
 
 export const emptyVaultSnapshot: VaultSnapshot = {

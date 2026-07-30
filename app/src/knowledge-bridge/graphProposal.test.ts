@@ -38,6 +38,31 @@ const draft: PaperBridgeDraft = {
 };
 
 describe("Knowledge Bridge graph proposals", () => {
+  it("creates one decomposed bridge module instead of a new atomic L2 node", () => {
+    const snapshot = structuredClone(emptyVaultSnapshot);
+    const decomposed: PaperBridgeDraft = {
+      ...draft,
+      bridgeModule: {
+        title: "Mechanism module",
+        definition: "Maps old knowledge through intermediate transformations.",
+        steps: [
+          { id: "map", title: "Map variables", kind: "mapping", explanation: "Align old and new variables." },
+          { id: "mechanism", title: "Trace the mechanism", kind: "mechanism", explanation: "Explain the change." },
+        ],
+      },
+    };
+    const proposal = createGraphChangeProposal(decomposed, snapshot, 200, "proposal-module");
+    const staged = { ...snapshot, graphProposals: [proposal] };
+    const applied = applyGraphChangeProposal(staged, proposal.id, 300);
+
+    expect(proposal.operations.filter((operation) => operation.type === "create-node")).toHaveLength(2);
+    expect(proposal.operations.some((operation) => operation.type === "create-bridge-module")).toBe(true);
+    expect(applied.nodes.some((node) => node.role === "L2")).toBe(false);
+    expect(applied.bridgeModules).toHaveLength(1);
+    expect(applied.bridgeModules?.[0].steps).toHaveLength(2);
+    expect(applied.relations[0]).toMatchObject({ bridgeModuleId: applied.bridgeModules?.[0].id });
+  });
+
   it("keeps agent output outside the graph until the proposal is applied", () => {
     const snapshot = structuredClone(emptyVaultSnapshot);
     const proposal = createGraphChangeProposal(draft, snapshot, 200, "proposal-1");

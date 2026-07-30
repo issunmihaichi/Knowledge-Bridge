@@ -216,4 +216,48 @@ describe("pending resolution", () => {
       boundary: "Association alone does not establish causality.",
     });
   });
+
+  it("adopts a decomposed AI bridge as a pending module without creating an L2 node", () => {
+    const current = snapshot();
+    current.nodes.push({
+      id: "frontier-module",
+      title: "New frontier concept",
+      role: "L3",
+      status: "pending",
+      content: "New source material",
+      x: 300,
+      y: 0,
+    });
+    current.pending.push({
+      id: "ai-module",
+      filePath: "ai://remote-ai/bridge/frontier-module",
+      sourceId: "frontier-module",
+      targetTitle: "A decomposed bridge",
+      kind: "ai-bridge",
+      raw: "The bridge is stepwise.",
+      anchorId: "source",
+      anchorReason: "The anchor is auditable.",
+      candidates: [{ id: "module", title: "A decomposed bridge", reason: "Stepwise", confidence: 0.81 }],
+      bridgeModule: {
+        title: "A decomposed bridge",
+        steps: [
+          { id: "map", title: "Map", kind: "mapping", explanation: "Align variables." },
+          { id: "mechanism", title: "Mechanism", kind: "mechanism", explanation: "Explain the change." },
+        ],
+      },
+    });
+
+    const next = applyPendingResolution(current, { pendingId: "ai-module", action: "accept", now: 20 });
+
+    expect(next.bridgeModules).toHaveLength(1);
+    expect(next.bridgeModules?.[0]).toMatchObject({ sourceId: "source", targetId: "frontier-module" });
+    expect(next.nodes.filter((node) => node.role === "L2")).toHaveLength(0);
+    expect(next.relations).toContainEqual(
+      expect.objectContaining({
+        bridgeModuleId: next.bridgeModules?.[0].id,
+        source: "source",
+        target: "frontier-module",
+      }),
+    );
+  });
 });

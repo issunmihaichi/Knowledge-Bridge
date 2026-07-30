@@ -477,6 +477,25 @@ function PaperBridgePanel({
                 </div>
               ))}
             </div>
+            {displayedDraft.bridgeModule && (
+              <div className="space-y-2 border-l-2 border-emerald-600/70 bg-emerald-500/5 px-2.5 py-2 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">L2 桥梁模块 · {displayedDraft.bridgeModule.title}</span>
+                  <Badge variant="outline">{displayedDraft.bridgeModule.steps.length} 步</Badge>
+                </div>
+                {displayedDraft.bridgeModule.definition && (
+                  <div className="text-muted-foreground leading-5">{displayedDraft.bridgeModule.definition}</div>
+                )}
+                <ol className="space-y-1.5 pl-4">
+                  {displayedDraft.bridgeModule.steps.map((step) => (
+                    <li key={step.id} className="text-muted-foreground leading-5">
+                      <span className="text-foreground font-medium">{step.title}</span>
+                      <span> · {step.explanation}</span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
             <div className="border-muted-foreground/30 border-l pl-2 text-xs leading-5">
               <span className="font-medium">锚点依据：</span>
               {displayedDraft.anchorReason}
@@ -740,12 +759,14 @@ function BridgeSuggestions({
   onFreeze,
   onAdoptSuggestion,
   onApplyMigration,
+  onToggleModule,
 }: {
   snapshot: VaultSnapshot;
   connection: AiConnectionSettings;
   onFreeze: (l2Id: string) => void;
   onAdoptSuggestion: (nodeId: string, suggestion: BridgeSuggestion) => void;
   onApplyMigration: (preview: ReturnType<typeof buildFrozenL2MigrationPreview>, pathIds: Set<string>) => void;
+  onToggleModule: (moduleId: string, collapsed: boolean) => void;
 }) {
   const anchor = snapshot.nodes.find(
     (node) =>
@@ -755,6 +776,7 @@ function BridgeSuggestions({
       node.sourceKind !== "denied",
   );
   const l2Nodes = snapshot.nodes.filter((node) => node.role === "L2");
+  const bridgeModules = snapshot.bridgeModules ?? [];
   const frozenL2 = l2Nodes.find((node) => node.status === "frozen");
   const l3Nodes = snapshot.nodes.filter(
     (node) => node.role === "L3" && node.status !== "missing-source" && node.status !== "frozen",
@@ -883,20 +905,25 @@ function BridgeSuggestions({
           {suggestion && (
             <div className="space-y-2 border-t pt-2 text-xs">
               <div className="flex items-center gap-2">
-                <span className="min-w-0 flex-1 truncate font-medium">
-                  L2 {snapshot.nodes.find((node) => node.id === suggestion.bridgeId)?.title ?? suggestion.bridgeTitle}
-                </span>
-                <Badge variant="outline">{suggestion.isNewBridge ? "新候选" : "复用"}</Badge>
+                <span className="min-w-0 flex-1 truncate font-medium">L2 模块 {suggestion.bridgeModule.title}</span>
+                <Badge variant="outline">{suggestion.bridgeModule.steps.length} 步</Badge>
                 <Badge variant="secondary">{Math.round(suggestion.confidence * 100)}%</Badge>
               </div>
               <div className="text-muted-foreground leading-5">{suggestion.reason}</div>
-              {suggestion.isNewBridge && (suggestion.bridgeDefinition || suggestion.bridgeBoundary) && (
+              {(suggestion.bridgeModule.definition || suggestion.bridgeModule.boundary) && (
                 <div className="bg-muted/30 space-y-1 border-l px-2 py-1.5 text-[11px] leading-4">
-                  {suggestion.bridgeDefinition && <div>定义：{suggestion.bridgeDefinition}</div>}
-                  {suggestion.bridgeScope && <div>范围：{suggestion.bridgeScope}</div>}
-                  {suggestion.bridgeBoundary && <div>边界：{suggestion.bridgeBoundary}</div>}
+                  {suggestion.bridgeModule.definition && <div>定义：{suggestion.bridgeModule.definition}</div>}
+                  {suggestion.bridgeModule.scope && <div>范围：{suggestion.bridgeModule.scope}</div>}
+                  {suggestion.bridgeModule.boundary && <div>边界：{suggestion.bridgeModule.boundary}</div>}
                 </div>
               )}
+              <ol className="text-muted-foreground space-y-1 border-l pl-5 text-[11px] leading-4">
+                {suggestion.bridgeModule.steps.map((step) => (
+                  <li key={step.id}>
+                    <span className="text-foreground font-medium">{step.title}</span> · {step.explanation}
+                  </li>
+                ))}
+              </ol>
               <div className="border-l pl-2">
                 <div className="font-medium">
                   L1 {snapshot.nodes.find((node) => node.id === suggestion.anchorId)?.title ?? "无可用锚点"}
@@ -906,13 +933,8 @@ function BridgeSuggestions({
                   <div className="text-muted-foreground mt-1">依据：{suggestion.anchorEvidence.join("、")}</div>
                 )}
               </div>
-              {(suggestion.alternatives.length > 0 || suggestion.anchorAlternatives.length > 0) && (
+              {suggestion.anchorAlternatives.length > 0 && (
                 <div className="text-muted-foreground text-[11px] leading-4">
-                  备选机制：
-                  {suggestion.alternatives
-                    .map((item) => snapshot.nodes.find((node) => node.id === item.id)?.title ?? item.id)
-                    .join("、") || "无"}
-                  <br />
                   备选锚点：
                   {suggestion.anchorAlternatives
                     .map((item) => snapshot.nodes.find((node) => node.id === item.id)?.title ?? item.id)
@@ -931,6 +953,35 @@ function BridgeSuggestions({
           )}
         </div>
       </div>
+
+      {bridgeModules.length > 0 && (
+        <div className="overflow-hidden rounded-md border">
+          <div className="bg-muted/35 flex items-center justify-between border-b px-3 py-2 text-xs font-medium">
+            <span>L2 桥梁模块</span>
+            <Badge variant="secondary">{bridgeModules.length}</Badge>
+          </div>
+          <div className="divide-y">
+            {bridgeModules.map((module) => (
+              <div key={module.id} className="flex items-center gap-2 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">{module.title}</div>
+                  <div className="text-muted-foreground mt-0.5 text-[10px]">
+                    {module.steps.length} 步 · {module.status === "formal" ? "已复核" : "待复核"}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-[11px]"
+                  onClick={() => onToggleModule(module.id, !module.collapsed)}
+                >
+                  {module.collapsed ? "展开" : "折叠"}
+                </Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="overflow-hidden rounded-md border">
         <div className="bg-muted/35 flex items-center gap-2 border-b px-3 py-2 text-xs font-medium">
@@ -1408,6 +1459,7 @@ export default function KnowledgeBridgeWindow({
     void import("@/knowledge-bridge/canvas").then(
       ({
         readChangedKnowledgeBridgeCanvasDetails,
+        readKnowledgeBridgeModulePositions,
         readKnowledgeBridgeCanvasPositions,
         updateKnowledgeBridgeSemanticZoom,
       }) => {
@@ -1452,7 +1504,11 @@ export default function KnowledgeBridgeWindow({
           if (activeProject.controller.isMouseDown[0]) return;
           const backend = backendRef.current;
           if (!backend) return;
-          const positionOperation = createCanvasPositionOperation(readKnowledgeBridgeCanvasPositions(activeProject));
+          const positionOperation = createCanvasPositionOperation(
+            readKnowledgeBridgeCanvasPositions(activeProject),
+            Date.now(),
+            readKnowledgeBridgeModulePositions(activeProject),
+          );
           const applied = backend.applyOperation(snapshotRef.current, positionOperation);
           if (applied.changed) {
             snapshotRef.current = applied.snapshot;
@@ -1888,23 +1944,52 @@ export default function KnowledgeBridgeWindow({
     }
   };
 
+  const toggleBridgeModule = (moduleId: string, collapsed: boolean) => {
+    const current = snapshotRef.current;
+    const module = (current.bridgeModules ?? []).find((item) => item.id === moduleId);
+    if (!module || module.collapsed === collapsed) return;
+    const operation: KnowledgeGraphOperationMeta = {
+      id: `kb-operation:${crypto.randomUUID()}`,
+      origin: "user",
+      type: "bridge-module-toggle",
+      createdAt: Date.now(),
+    };
+    if (
+      commitSnapshot(
+        {
+          ...current,
+          bridgeModules: (current.bridgeModules ?? []).map((item) =>
+            item.id === moduleId ? { ...item, collapsed } : item,
+          ),
+        },
+        "bridge-module-toggle",
+        operation,
+      )
+    ) {
+      toast.message(collapsed ? "桥梁模块已折叠为摘要。" : "桥梁模块步骤已展开。");
+    }
+  };
+
   const adoptBridgeSuggestion = (nodeId: string, suggestion: BridgeSuggestion) => {
     const current = snapshotRef.current;
     const source = current.nodes.find(
       (node) =>
         node.id === nodeId && node.role === "L3" && node.status !== "missing-source" && node.status !== "frozen",
     );
-    const bridge = current.nodes.find(
-      (node) => node.id === suggestion.bridgeId && node.role === "L2" && node.status === "formal",
+    const anchor = current.nodes.find(
+      (node) =>
+        node.id === suggestion.anchorId &&
+        node.role === "L1" &&
+        node.status !== "missing-source" &&
+        node.status !== "frozen",
     );
-    if (!source || (!suggestion.isNewBridge && !bridge)) {
-      toast.error("建议引用的知识节点已变化，请重新生成桥梁建议。");
+    if (!source || !anchor) {
+      toast.error("桥梁模块需要一个仍可用的 L1 锚点和 L3 新知节点；请先确认锚点后重新生成。");
       return;
     }
-    const bridgeId = bridge?.id ?? suggestion.bridgeId;
-    const bridgeTitle = bridge?.title ?? suggestion.bridgeTitle.trim();
-    if (!bridgeTitle) {
-      toast.error("AI 没有给出可识别的桥梁机制名称，请重新生成。");
+    const bridgeTitle = suggestion.bridgeModule.title.trim();
+    if (!bridgeTitle || suggestion.bridgeModule.steps.length < 2) {
+      toast.error("AI 桥梁草拟缺少至少两个可检查步骤，请重新生成。");
       return;
     }
     const duplicate = current.pending.some(
@@ -1918,21 +2003,6 @@ export default function KnowledgeBridgeWindow({
       return;
     }
     const now = Date.now();
-    const alternatives = suggestion.alternatives.flatMap((alternative, index) => {
-      const node = current.nodes.find(
-        (candidate) => candidate.id === alternative.id && candidate.role === "L2" && candidate.status === "formal",
-      );
-      return node
-        ? [
-            {
-              id: node.id,
-              title: node.title,
-              reason: alternative.reason,
-              confidence: Math.max(0, suggestion.confidence - (index + 1) * 0.1),
-            },
-          ]
-        : [];
-    });
     const pending: PendingMention = {
       id: `pending:ai-bridge:${crypto.randomUUID()}`,
       filePath: `ai://${suggestion.provider}/bridge/${source.id}`,
@@ -1940,22 +2010,18 @@ export default function KnowledgeBridgeWindow({
       targetTitle: bridgeTitle,
       kind: "ai-bridge",
       raw: suggestion.reason,
-      suggestedRole: "L2",
-      definition: suggestion.bridgeDefinition,
-      scope: suggestion.bridgeScope,
-      boundary: suggestion.bridgeBoundary,
-      anchorId: suggestion.anchorId,
+      bridgeModule: suggestion.bridgeModule,
+      anchorId: anchor.id,
       anchorReason: suggestion.anchorReason,
       anchorEvidence: suggestion.anchorEvidence,
       anchorAlternatives: suggestion.anchorAlternatives,
       candidates: [
         {
-          id: bridgeId,
+          id: `proposed-bridge-module:${source.id}`,
           title: bridgeTitle,
           reason: suggestion.reason,
           confidence: suggestion.confidence,
         },
-        ...alternatives,
       ],
     };
     const operation: KnowledgeGraphOperationMeta = {
@@ -2152,6 +2218,7 @@ export default function KnowledgeBridgeWindow({
               onFreeze={freezeBridge}
               onAdoptSuggestion={adoptBridgeSuggestion}
               onApplyMigration={applyMigration}
+              onToggleModule={toggleBridgeModule}
             />
           </TabsContent>
           <TabsContent value="evidence" className="min-h-0 overflow-y-auto p-3">

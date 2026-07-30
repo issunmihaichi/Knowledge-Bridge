@@ -19,6 +19,52 @@ describe("source bridge drafting", () => {
     expect(draft.status).toBe("draft");
     expect(draft.chain.map((step) => step.role)).toEqual(["frontier-concept", "bridge-mechanism", "learning-anchor"]);
     expect(draft.chain.at(-1)?.nodeId).toBe("l1-cell");
+    expect(draft.bridgeModule).toMatchObject({
+      steps: expect.arrayContaining([expect.objectContaining({ kind: "mechanism" })]),
+    });
+    expect(draft.bridgeModule?.steps.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps a remote bridge decomposed into inspectable module steps", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  title: "Decomposed draft",
+                  summary: "A provisional path",
+                  anchorReason: "The anchor is audited",
+                  confidence: 0.8,
+                  chain: [
+                    { role: "frontier-concept", title: "New topic", explanation: "New source concept" },
+                    { role: "bridge-mechanism", title: "Module summary", explanation: "Stepwise connection" },
+                    { role: "learning-anchor", nodeId: "l1-cell", title: "Cell", explanation: "Audited anchor" },
+                  ],
+                  bridgeModule: {
+                    title: "Expression-to-phenotype bridge",
+                    steps: [
+                      { id: "map", title: "Map variables", kind: "mapping", explanation: "Match variables." },
+                      { id: "cause", title: "Trace mechanism", kind: "mechanism", explanation: "Trace the change." },
+                    ],
+                  },
+                }),
+              },
+            },
+          ],
+        }),
+      ),
+    );
+
+    const draft = await draftPaperBridge("A new source", structuredClone(demoVaultSnapshot), 100, {
+      endpoint: "https://example.test/v1",
+      model: "test-model",
+      apiKey: "",
+    });
+
+    expect(draft.provider).toBe("remote-ai");
+    expect(draft.bridgeModule?.steps.map((step) => step.kind)).toEqual(["mapping", "mechanism"]);
   });
 
   it("uses the configured service and preserves the audited anchor", async () => {

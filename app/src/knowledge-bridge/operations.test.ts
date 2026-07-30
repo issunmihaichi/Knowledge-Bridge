@@ -42,6 +42,44 @@ describe("Knowledge Bridge operation protocol", () => {
     expect(applied.snapshot.relations).toEqual(snapshot.relations);
   });
 
+  it("persists module headers and step positions without treating steps as knowledge nodes", () => {
+    const snapshot = structuredClone(demoVaultSnapshot);
+    snapshot.bridgeModules = [
+      {
+        id: "module-1",
+        title: "Bridge module",
+        status: "pending",
+        x: 10,
+        y: 20,
+        collapsed: false,
+        steps: [
+          { id: "map", title: "Map", kind: "mapping", explanation: "Align", x: 30, y: 40 },
+          { id: "mechanism", title: "Mechanism", kind: "mechanism", explanation: "Explain", x: 50, y: 60 },
+        ],
+      },
+    ];
+    const applied = applyKnowledgeGraphOperation(
+      snapshot,
+      createCanvasPositionOperation([], 350, [
+        {
+          id: "module-1",
+          x: 100,
+          y: 120,
+          steps: [
+            { id: "map", x: 130, y: 140 },
+            { id: "mechanism", x: 150, y: 160 },
+          ],
+        },
+      ]),
+    );
+
+    expect(applied.snapshot.bridgeModules?.[0]).toMatchObject({ x: 100, y: 120 });
+    expect(applied.snapshot.bridgeModules?.[0].steps).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: "map", x: 130, y: 140 })]),
+    );
+    expect(applied.snapshot.nodes).toEqual(snapshot.nodes);
+  });
+
   it("does not create a transaction for unchanged canvas coordinates", () => {
     const snapshot = structuredClone(demoVaultSnapshot);
     const node = snapshot.nodes[0];

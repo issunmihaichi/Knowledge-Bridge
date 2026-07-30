@@ -1,4 +1,4 @@
-import type { KnowledgeNode, KnowledgeRelation, PendingMention, VaultSnapshot } from "./model";
+import type { BridgeModule, KnowledgeNode, KnowledgeRelation, PendingMention, VaultSnapshot } from "./model";
 import { upsertKbId } from "./sync";
 import type { VaultAdapter } from "./vault";
 
@@ -152,6 +152,87 @@ function pendingAnchorRelation(
   };
 }
 
+function createPendingBridgeModule(
+  snapshot: VaultSnapshot,
+  item: PendingMention,
+  now: number,
+): BridgeModule | undefined {
+  if (item.kind !== "ai-bridge" || !item.bridgeModule || !item.sourceId || !item.anchorId) return undefined;
+  const target = snapshot.nodes.find(
+    (node) => node.id === item.sourceId && node.status !== "frozen" && node.status !== "missing-source",
+  );
+  const source = snapshot.nodes.find(
+    (node) =>
+      node.id === item.anchorId && node.role === "L1" && node.status !== "frozen" && node.status !== "missing-source",
+  );
+  if (!source || !target || source.id === target.id || item.bridgeModule.steps.length < 2) return undefined;
+  const count = item.bridgeModule.steps.length;
+  const confidence = item.candidates?.[0]?.confidence ?? 0.5;
+  return {
+    id: `bridge-module:pending:${item.id}`,
+    title: item.bridgeModule.title,
+    definition: item.bridgeModule.definition,
+    scope: item.bridgeModule.scope,
+    boundary: item.bridgeModule.boundary,
+    status: "pending",
+    sourceId: source.id,
+    targetId: target.id,
+    x: Math.round((source.x + target.x) / 2),
+    y: Math.round((source.y + target.y) / 2 - 110),
+    collapsed: false,
+    steps: item.bridgeModule.steps.map((step, index) => {
+      const ratio = (index + 1) / (count + 1);
+      return {
+        ...step,
+        x: Math.round(source.x + (target.x - source.x) * ratio),
+        y: Math.round(source.y + (target.y - source.y) * ratio),
+      };
+    }),
+    ai: {
+      status: "adopted",
+      reason: item.raw,
+      evidence: item.anchorEvidence ?? [item.filePath],
+      confidence,
+      alternatives: (item.anchorAlternatives ?? []).map((candidate) => ({
+        id: candidate.id,
+        reason: candidate.reason,
+        confidence: candidate.confidence,
+      })),
+      createdAt: now,
+      adoptedAt: now,
+    },
+  };
+}
+
+function pendingModuleRelation(item: PendingMention, module: BridgeModule, now: number): KnowledgeRelation {
+  const confidence = item.candidates?.[0]?.confidence ?? 0.5;
+  return {
+    id: `pending-module-relation:${item.id}`,
+    source: module.sourceId!,
+    target: module.targetId!,
+    label: module.title,
+    layer: "cognitive",
+    cognitiveKind: "explanation",
+    status: "pending",
+    bridgeModuleId: module.id,
+    confidence,
+    context: item.filePath,
+    ai: {
+      status: "adopted",
+      reason: item.raw,
+      evidence: item.anchorEvidence ?? [item.filePath],
+      confidence,
+      alternatives: (item.anchorAlternatives ?? []).map((candidate) => ({
+        id: candidate.id,
+        reason: candidate.reason,
+        confidence: candidate.confidence,
+      })),
+      createdAt: now,
+      adoptedAt: now,
+    },
+  };
+}
+
 /** Resolve one pending item without promoting it to formal scientific truth. */
 export function applyPendingResolution(snapshot: VaultSnapshot, resolution: PendingResolution): VaultSnapshot {
   const item = snapshot.pending.find((entry) => entry.id === resolution.pendingId);
@@ -197,6 +278,19 @@ export function applyPendingResolution(snapshot: VaultSnapshot, resolution: Pend
     };
   }
   if (item.kind === "lineage" || item.kind === "scale-gap" || item.kind === "severed-link") return snapshot;
+
+  if (item.kind === "ai-bridge" && item.bridgeModule) {
+    const module = createPendingBridgeModule(snapshot, item, resolution.now);
+    if (!module) return snapshot;
+    const bridgeModules = snapshot.bridgeModules?.some((entry) => entry.id === module.id)
+      ? snapshot.bridgeModules
+      : [...(snapshot.bridgeModules ?? []), module];
+    const relation = pendingModuleRelation(item, module, resolution.now);
+    const relations = snapshot.relations.some((entry) => entry.id === relation.id)
+      ? snapshot.relations
+      : [...snapshot.relations, relation];
+    return { ...snapshot, bridgeModules, relations, pending: withoutPending(snapshot, item.id) };
+  }
 
   const existing = findTarget(snapshot, item);
   const targetId = existing?.id ?? resolution.newNodeId;

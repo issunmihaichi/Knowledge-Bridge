@@ -1,11 +1,18 @@
 import { applyGraphChangeProposal, createGraphChangeProposal } from "./graphProposal";
 import { applyPendingResolution, type PendingResolution } from "./pending";
-import type { KnowledgeGraphOperationMeta, PaperBridgeDraft, VaultSnapshot } from "./model";
+import type { BridgeModule, KnowledgeGraphOperationMeta, PaperBridgeDraft, VaultSnapshot } from "./model";
 
 export interface KnowledgeNodePosition {
   id: string;
   x: number;
   y: number;
+}
+
+export interface BridgeModulePosition {
+  id: string;
+  x: number;
+  y: number;
+  steps: Array<{ id: string; x: number; y: number }>;
 }
 
 export interface KnowledgeNodeDetails {
@@ -23,6 +30,7 @@ export interface SetCanvasPositionsOperation extends KnowledgeGraphOperationMeta
   type: "set-canvas-positions";
   origin: "canvas";
   positions: KnowledgeNodePosition[];
+  bridgeModules?: BridgeModulePosition[];
 }
 
 export interface SetNodeDetailsOperation extends KnowledgeGraphOperationMeta {
@@ -82,7 +90,11 @@ function applyAgentProposal(snapshot: VaultSnapshot, operation: ApplyAgentPropos
   );
 }
 
-function applyCanvasPositions(snapshot: VaultSnapshot, positions: KnowledgeNodePosition[]): VaultSnapshot {
+function applyCanvasPositions(
+  snapshot: VaultSnapshot,
+  positions: KnowledgeNodePosition[],
+  modulePositions: BridgeModulePosition[] = [],
+): VaultSnapshot {
   const nextPositions = new Map(positions.map((position) => [position.id, position]));
   let changed = false;
   const nodes = snapshot.nodes.map((node) => {
@@ -91,7 +103,22 @@ function applyCanvasPositions(snapshot: VaultSnapshot, positions: KnowledgeNodeP
     changed = true;
     return { ...node, x: position.x, y: position.y };
   });
-  return changed ? { ...snapshot, nodes } : snapshot;
+  const modulePositionById = new Map(modulePositions.map((position) => [position.id, position]));
+  const bridgeModules = (snapshot.bridgeModules ?? []).map((module) => {
+    const position = modulePositionById.get(module.id);
+    if (!position) return module;
+    const stepsById = new Map(position.steps.map((step) => [step.id, step]));
+    const steps = module.steps.map((step) => {
+      const next = stepsById.get(step.id);
+      if (!next || (next.x === step.x && next.y === step.y)) return step;
+      changed = true;
+      return { ...step, x: next.x, y: next.y };
+    });
+    if (module.x === position.x && module.y === position.y && steps === module.steps) return module;
+    changed = true;
+    return { ...module, x: position.x, y: position.y, steps } satisfies BridgeModule;
+  });
+  return changed ? { ...snapshot, nodes, bridgeModules } : snapshot;
 }
 
 function applyNodeDetails(snapshot: VaultSnapshot, details: KnowledgeNodeDetails[]): VaultSnapshot {
@@ -114,7 +141,7 @@ export function applyKnowledgeGraphOperation(
     operation.type === "agent-proposal-apply"
       ? applyAgentProposal(snapshot, operation)
       : operation.type === "set-canvas-positions"
-        ? applyCanvasPositions(snapshot, operation.positions)
+        ? applyCanvasPositions(snapshot, operation.positions, operation.bridgeModules)
         : operation.type === "set-node-details"
           ? applyNodeDetails(snapshot, operation.details)
           : applyPendingResolution(snapshot, operation);
@@ -149,12 +176,14 @@ export function createAgentProposalOperation(draft: PaperBridgeDraft, now = Date
 export function createCanvasPositionOperation(
   positions: KnowledgeNodePosition[],
   now = Date.now(),
+  bridgeModules?: BridgeModulePosition[],
 ): SetCanvasPositionsOperation {
   return {
     id: `kb-operation:${crypto.randomUUID()}`,
     origin: "canvas",
     type: "set-canvas-positions",
     positions,
+    ...(bridgeModules?.length ? { bridgeModules } : {}),
     createdAt: now,
   };
 }

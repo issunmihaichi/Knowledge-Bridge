@@ -1,6 +1,12 @@
 import initSqlJs, { type Database } from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import type { KnowledgeGraphOperationMeta, KnowledgeRelation, ManagedLinkSnapshot, VaultSnapshot } from "./model";
+import type {
+  BridgeModule,
+  KnowledgeGraphOperationMeta,
+  KnowledgeRelation,
+  ManagedLinkSnapshot,
+  VaultSnapshot,
+} from "./model";
 
 const DB_KEY = "knowledge-bridge.graph.db";
 
@@ -99,6 +105,7 @@ export class GraphLedger {
       CREATE TABLE IF NOT EXISTS migration_records (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS paper_drafts (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS graph_proposals (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS bridge_modules (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS transactions (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER NOT NULL, undone_at INTEGER);
       CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     `);
@@ -130,6 +137,9 @@ export class GraphLedger {
     const graphProposals = rows<{ payload: string }>(this.db, "SELECT payload FROM graph_proposals").map((row) =>
       JSON.parse(row.payload),
     );
+    const bridgeModules = rows<{ payload: string }>(this.db, "SELECT payload FROM bridge_modules").map((row) =>
+      JSON.parse(row.payload),
+    ) as BridgeModule[];
     return normalizeSnapshot({
       nodes,
       relations,
@@ -140,6 +150,7 @@ export class GraphLedger {
       migrationRecords,
       paperDrafts,
       graphProposals,
+      ...(bridgeModules.length > 0 ? { bridgeModules } : {}),
     });
   }
 
@@ -164,7 +175,7 @@ export class GraphLedger {
     this.db.run("BEGIN");
     try {
       this.db.run(
-        "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts; DELETE FROM graph_proposals;",
+        "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts; DELETE FROM graph_proposals; DELETE FROM bridge_modules;",
       );
       for (const node of snapshot.nodes)
         this.db.run("INSERT INTO nodes VALUES (?, ?)", [node.id, JSON.stringify(node)]);
@@ -184,6 +195,8 @@ export class GraphLedger {
         this.db.run("INSERT INTO paper_drafts VALUES (?, ?)", [draft.id, JSON.stringify(draft)]);
       for (const proposal of snapshot.graphProposals)
         this.db.run("INSERT INTO graph_proposals VALUES (?, ?)", [proposal.id, JSON.stringify(proposal)]);
+      for (const module of snapshot.bridgeModules ?? [])
+        this.db.run("INSERT INTO bridge_modules VALUES (?, ?)", [module.id, JSON.stringify(module)]);
       for (const edgeId of sideEffects.deleteLinkSnapshotIds ?? []) {
         this.db.run("DELETE FROM link_snapshots WHERE edge_id = ?", [edgeId]);
       }
@@ -290,7 +303,7 @@ export class GraphLedger {
   private replace(snapshot: VaultSnapshot) {
     snapshot = normalizeSnapshot(snapshot);
     this.db.run(
-      "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts; DELETE FROM graph_proposals;",
+      "DELETE FROM nodes; DELETE FROM relations; DELETE FROM pending_items; DELETE FROM scale_protocols; DELETE FROM knowledge_lenses; DELETE FROM argument_roles; DELETE FROM migration_records; DELETE FROM paper_drafts; DELETE FROM graph_proposals; DELETE FROM bridge_modules;",
     );
     for (const node of snapshot.nodes) this.db.run("INSERT INTO nodes VALUES (?, ?)", [node.id, JSON.stringify(node)]);
     for (const relation of snapshot.relations)
@@ -309,6 +322,8 @@ export class GraphLedger {
       this.db.run("INSERT INTO paper_drafts VALUES (?, ?)", [draft.id, JSON.stringify(draft)]);
     for (const proposal of snapshot.graphProposals)
       this.db.run("INSERT INTO graph_proposals VALUES (?, ?)", [proposal.id, JSON.stringify(proposal)]);
+    for (const module of snapshot.bridgeModules ?? [])
+      this.db.run("INSERT INTO bridge_modules VALUES (?, ?)", [module.id, JSON.stringify(module)]);
   }
 
   private flush() {

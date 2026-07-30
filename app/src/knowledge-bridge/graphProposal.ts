@@ -1,5 +1,6 @@
 import type {
   AgentExecutionTrace,
+  BridgeModule,
   GraphChangeProposal,
   KnowledgeNode,
   LearningRole,
@@ -77,43 +78,74 @@ function proposalNode(
   };
 }
 
-export function createGraphChangeProposal(
+function createBridgeModule(
+  proposalId: string,
+  draft: PaperBridgeDraft,
+  source: KnowledgeNode,
+  target: KnowledgeNode,
+  now: number,
+): BridgeModule | undefined {
+  const bridgeModule = draft.bridgeModule;
+  if (!bridgeModule || bridgeModule.steps.length < 2) return undefined;
+  const stepCount = bridgeModule.steps.length;
+  const middleX = Math.round((source.x + target.x) / 2);
+  const middleY = Math.round((source.y + target.y) / 2);
+  return {
+    id: `bridge-module:${proposalId}`,
+    title: bridgeModule.title,
+    definition: bridgeModule.definition,
+    scope: bridgeModule.scope,
+    boundary: bridgeModule.boundary,
+    status: "pending",
+    sourceId: source.id,
+    targetId: target.id,
+    x: middleX,
+    y: middleY - 110,
+    collapsed: false,
+    steps: bridgeModule.steps.map((step, index) => {
+      const ratio = (index + 1) / (stepCount + 1);
+      return {
+        ...step,
+        x: Math.round(source.x + (target.x - source.x) * ratio),
+        y: Math.round(source.y + (target.y - source.y) * ratio),
+      };
+    }),
+    ai: {
+      status: "draft",
+      reason: draft.summary,
+      evidence: [draft.anchorReason],
+      confidence: draft.confidence,
+      alternatives: [],
+      createdAt: now,
+    },
+  };
+}
+
+function isModuleSummaryStep(step: PaperBridgeStep): boolean {
+  return step.role === "bridge-mechanism" || step.role === "scale-gap";
+}
+
+function createLegacyRelations(
+  proposalId: string,
   draft: PaperBridgeDraft,
   snapshot: VaultSnapshot,
-  now = Date.now(),
-  proposalId = `graph-proposal:${crypto.randomUUID()}`,
-): GraphChangeProposal {
-  const knownNodes = new Set(snapshot.nodes.map((node) => node.id));
-  const nodeIds: string[] = [];
-  const operations: GraphChangeProposal["operations"] = [];
-  let createdNodeCount = 0;
-
-  for (const step of draft.chain) {
-    const existing = step.nodeId ? snapshot.nodes.find((node) => node.id === step.nodeId) : undefined;
-    if (step.nodeId && knownNodes.has(step.nodeId) && reusableStepNode(step, existing)) {
-      nodeIds.push(step.nodeId);
-      continue;
-    }
-    const node = proposalNode(proposalId, step, snapshot, createdNodeCount++, now);
-    nodeIds.push(node.id);
-    knownNodes.add(node.id);
-    operations.push({ type: "create-node", node });
-  }
-
+  nodeIds: string[],
+  now: number,
+): GraphChangeProposal["operations"] {
   const existingPairs = new Set(snapshot.relations.map((relation) => `${relation.source}\0${relation.target}`));
+  const operations: GraphChangeProposal["operations"] = [];
   const reversed = [...nodeIds].reverse();
   for (let index = 0; index < reversed.length - 1; index++) {
     const source = reversed[index];
     const target = reversed[index + 1];
     if (source === target || existingPairs.has(`${source}\0${target}`)) continue;
-    const relationId = `agent-relation:${proposalId}:${index}`;
     operations.push({
       type: "create-relation",
       relation: {
-        id: relationId,
+        id: `agent-relation:${proposalId}:${index}`,
         source,
         target,
-        label: index === 0 ? "学习桥梁" : "解释新知",
+        label: index === 0 ? "Learning bridge" : "Explains new knowledge",
         layer: "cognitive",
         cognitiveKind: "explanation",
         status: "pending",
@@ -128,6 +160,81 @@ export function createGraphChangeProposal(
         },
       },
     });
+  }
+  return operations;
+}
+
+/**
+ * Modern AI drafts create a decomposed L2 bridge module between L1 and L3.
+ * The legacy branch is retained only to keep historical paper drafts readable.
+ */
+export function createGraphChangeProposal(
+  draft: PaperBridgeDraft,
+  snapshot: VaultSnapshot,
+  now = Date.now(),
+  proposalId = `graph-proposal:${crypto.randomUUID()}`,
+): GraphChangeProposal {
+  const knownNodes = new Set(snapshot.nodes.map((node) => node.id));
+  const resolvedNodes = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  const nodeIds: string[] = [];
+  const stepNodeIds = new Map<string, string>();
+  const operations: GraphChangeProposal["operations"] = [];
+  let createdNodeCount = 0;
+
+  for (const step of draft.chain) {
+    if (draft.bridgeModule && isModuleSummaryStep(step)) continue;
+    const existing = step.nodeId ? snapshot.nodes.find((node) => node.id === step.nodeId) : undefined;
+    if (step.nodeId && knownNodes.has(step.nodeId) && reusableStepNode(step, existing)) {
+      nodeIds.push(step.nodeId);
+      stepNodeIds.set(step.id, step.nodeId);
+      continue;
+    }
+    const node = proposalNode(proposalId, step, snapshot, createdNodeCount++, now);
+    nodeIds.push(node.id);
+    stepNodeIds.set(step.id, node.id);
+    knownNodes.add(node.id);
+    resolvedNodes.set(node.id, node);
+    operations.push({ type: "create-node", node });
+  }
+
+  if (draft.bridgeModule) {
+    const anchorStep = draft.chain.find(
+      (step) => step.role === "learning-anchor" || step.role === "high-school-anchor",
+    );
+    const frontierStep = draft.chain.find((step) => step.role === "frontier-concept");
+    const source = anchorStep ? resolvedNodes.get(stepNodeIds.get(anchorStep.id) ?? "") : undefined;
+    const target = frontierStep ? resolvedNodes.get(stepNodeIds.get(frontierStep.id) ?? "") : undefined;
+    const module =
+      source && target && source.id !== target.id
+        ? createBridgeModule(proposalId, draft, source, target, now)
+        : undefined;
+    if (module && source && target) {
+      operations.push({ type: "create-bridge-module", module });
+      operations.push({
+        type: "create-relation",
+        relation: {
+          id: `agent-module-relation:${proposalId}`,
+          source: source.id,
+          target: target.id,
+          label: module.title,
+          layer: "cognitive",
+          cognitiveKind: "explanation",
+          status: "pending",
+          bridgeModuleId: module.id,
+          confidence: draft.confidence,
+          ai: {
+            status: "draft",
+            reason: draft.summary,
+            evidence: [draft.anchorReason],
+            confidence: draft.confidence,
+            alternatives: [],
+            createdAt: now,
+          },
+        },
+      });
+    }
+  } else {
+    operations.push(...createLegacyRelations(proposalId, draft, snapshot, nodeIds, now));
   }
 
   return {
@@ -157,6 +264,17 @@ export function applyGraphChangeProposal(snapshot: VaultSnapshot, proposalId: st
     nodeIds.add(operation.node.id);
   }
 
+  const bridgeModules = [...(snapshot.bridgeModules ?? [])];
+  const moduleIds = new Set(bridgeModules.map((module) => module.id));
+  for (const operation of proposal.operations) {
+    if (operation.type !== "create-bridge-module" || moduleIds.has(operation.module.id)) continue;
+    bridgeModules.push({
+      ...operation.module,
+      ai: operation.module.ai ? { ...operation.module.ai, status: "adopted", adoptedAt: now } : undefined,
+    });
+    moduleIds.add(operation.module.id);
+  }
+
   const relations = [...snapshot.relations];
   const relationIds = new Set(relations.map((relation) => relation.id));
   for (const operation of proposal.operations) {
@@ -173,6 +291,7 @@ export function applyGraphChangeProposal(snapshot: VaultSnapshot, proposalId: st
     ...snapshot,
     nodes,
     relations,
+    bridgeModules,
     graphProposals: snapshot.graphProposals.map((item) =>
       item.id === proposalId ? { ...item, status: "applied", appliedAt: now } : item,
     ),

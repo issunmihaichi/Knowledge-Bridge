@@ -7,8 +7,8 @@ import { Color, Vector } from "@graphif/data-structures";
 import { Rectangle } from "@graphif/shapes";
 import { collectFrozenPaths, relationBundles, type RelationBundle } from "./governance";
 import { shouldApplyLedgerPosition } from "./canvasPosition";
-import type { KnowledgeNode, KnowledgeRelation, VaultSnapshot } from "./model";
-import type { KnowledgeNodeDetails, KnowledgeNodePosition } from "./operations";
+import type { BridgeModule, BridgeModuleStep, KnowledgeNode, KnowledgeRelation, VaultSnapshot } from "./model";
+import type { BridgeModulePosition, KnowledgeNodeDetails, KnowledgeNodePosition } from "./operations";
 import { projectSemanticZoom } from "./semanticZoom";
 import { buildKnowledgeSpatialIndex, queryKnowledgeSpatialIndex, type KnowledgeSpatialIndex } from "./spatialIndex";
 
@@ -16,11 +16,21 @@ type ManagedKnowledgeGraph = {
   signature: string;
   snapshot: VaultSnapshot;
   nodes: Map<string, TextNode>;
-  edges: Array<{ edge: LineEdge; relation: KnowledgeRelation }>;
+  baseNodeIds: Set<string>;
+  edges: Array<{ edge: LineEdge; sourceId: string; targetId: string; relation?: KnowledgeRelation }>;
   mountedNodeIds: Set<string>;
   mountedEdgeIds: Set<string>;
   ledgerPositions: Map<string, { x: number; y: number }>;
   spatialIndex: KnowledgeSpatialIndex;
+};
+
+type BridgeCanvasEntity = {
+  id: string;
+  module: BridgeModule;
+  step?: BridgeModuleStep;
+  kind: "header" | "step";
+  x: number;
+  y: number;
 };
 
 const managedGraphs = new WeakMap<Project, ManagedKnowledgeGraph>();
@@ -36,7 +46,11 @@ const roleAlpha: Record<KnowledgeNode["role"], number> = { L1: 0.94, L2: 0.94, L
 const MAX_INITIAL_NODES = 700;
 
 function canvasSignature(snapshot: VaultSnapshot): string {
-  return JSON.stringify({ nodes: snapshot.nodes, relations: snapshot.relations });
+  return JSON.stringify({
+    nodes: snapshot.nodes,
+    relations: snapshot.relations,
+    bridgeModules: snapshot.bridgeModules ?? [],
+  });
 }
 
 function titleFor(node: KnowledgeNode): string {
@@ -49,6 +63,73 @@ function nodeColor(node: KnowledgeNode, opacity = 1): Color {
   if (node.status === "frozen") return new Color(128, 132, 141, 0.72 * opacity);
   const alpha = node.status === "missing-source" ? 0.32 : roleAlpha[node.role];
   return roleColors[node.role].toNewAlpha(alpha * opacity);
+}
+
+function bridgeEntityId(moduleId: string, stepId?: string): string {
+  return stepId ? `kb:bridge-step:${moduleId}:${stepId}` : `kb:bridge-module:${moduleId}:header`;
+}
+
+function bridgeEntityTitle(entity: BridgeCanvasEntity): string {
+  if (entity.kind === "header") return `L2 模块  ${entity.module.title}  ·  ${entity.module.steps.length} 步`;
+  const label =
+    entity.step?.kind === "mapping"
+      ? "映射"
+      : entity.step?.kind === "mechanism"
+        ? "机制"
+        : entity.step?.kind === "constraint"
+          ? "边界"
+          : "尺度";
+  return `L2 · ${label}  ${entity.step?.title ?? "桥梁步骤"}`;
+}
+
+function bridgeEntityColor(entity: BridgeCanvasEntity): Color {
+  const opacity = entity.module.status === "pending" ? 0.72 : 0.94;
+  if (entity.module.status === "frozen") return new Color(128, 132, 141, 0.7);
+  if (entity.kind === "header") return new Color(30, 120, 105, opacity);
+  if (entity.step?.kind === "mapping") return new Color(43, 127, 180, opacity);
+  if (entity.step?.kind === "constraint") return new Color(187, 133, 51, opacity);
+  if (entity.step?.kind === "scale-transition") return new Color(117, 104, 204, opacity);
+  return new Color(35, 141, 104, opacity);
+}
+
+function bridgeEntityDetails(entity: BridgeCanvasEntity): string {
+  if (entity.kind === "header") {
+    const lines = [`# ${entity.module.title}`, "", entity.module.definition ?? "待补充桥梁模块定义。"];
+    if (entity.module.scope) lines.push("", "## 适用范围", "", entity.module.scope);
+    if (entity.module.boundary) lines.push("", "## 边界", "", entity.module.boundary);
+    lines.push("", "## 步骤", "", ...entity.module.steps.map((step, index) => `${index + 1}. ${step.title}`));
+    return lines.join("\n");
+  }
+  const step = entity.step!;
+  const lines = [`# ${step.title}`, "", step.explanation];
+  if (step.definition) lines.push("", "## 定义", "", step.definition);
+  if (step.boundary) lines.push("", "## 边界", "", step.boundary);
+  if (step.evidence?.length) lines.push("", "## 证据线索", "", ...step.evidence.map((evidence) => `- ${evidence}`));
+  return lines.join("\n");
+}
+
+function bridgeCanvasEntities(snapshot: VaultSnapshot): BridgeCanvasEntity[] {
+  return (snapshot.bridgeModules ?? []).flatMap((module) => {
+    const header: BridgeCanvasEntity = {
+      id: bridgeEntityId(module.id),
+      module,
+      kind: "header",
+      x: module.x,
+      y: module.y,
+    };
+    if (module.collapsed) return [header];
+    return [
+      header,
+      ...module.steps.map((step) => ({
+        id: bridgeEntityId(module.id, step.id),
+        module,
+        step,
+        kind: "step" as const,
+        x: step.x,
+        y: step.y,
+      })),
+    ];
+  });
 }
 
 function detailsFor(node: KnowledgeNode): string {
@@ -124,6 +205,19 @@ function addEdge(
   return edge;
 }
 
+function addModuleEdge(project: Project, source: TextNode, target: TextNode, uuid: string, text: string): LineEdge {
+  const edge = new LineEdge(project, {
+    uuid,
+    associationList: [source, target],
+    text,
+    color: new Color(35, 141, 104, 0.9),
+    lineType: "solid",
+    arrowType: "none",
+  });
+  project.stageManager.add(edge, true);
+  return edge;
+}
+
 function createNode(project: Project, item: KnowledgeNode): TextNode {
   return new TextNode(project, {
     uuid: `kb:node:${item.id}`,
@@ -134,6 +228,27 @@ function createNode(project: Project, item: KnowledgeNode): TextNode {
     details: DetailsManager.markdownToDetails(detailsFor(item)),
     openDetailsOnClick: true,
   });
+}
+
+function createBridgeEntity(project: Project, entity: BridgeCanvasEntity): TextNode {
+  return new TextNode(project, {
+    uuid: entity.id,
+    text: bridgeEntityTitle(entity),
+    collisionBox: new CollisionBox([new Rectangle(new Vector(entity.x, entity.y), Vector.getZero())]),
+    color: bridgeEntityColor(entity),
+    fontScaleLevel: -1,
+    details: DetailsManager.markdownToDetails(bridgeEntityDetails(entity)),
+    openDetailsOnClick: true,
+  });
+}
+
+function updateBridgeEntity(node: TextNode, entity: BridgeCanvasEntity): void {
+  node.text = bridgeEntityTitle(entity);
+  node.color = bridgeEntityColor(entity);
+  node.details = DetailsManager.markdownToDetails(bridgeEntityDetails(entity));
+  node.openDetailsOnClick = true;
+  node.setFontScaleLevel(-1);
+  node.moveTo(new Vector(entity.x, entity.y));
 }
 
 function updateNode(
@@ -171,12 +286,61 @@ function viewportNodeIds(project: Project, managedIndex: KnowledgeSpatialIndex):
 function rebuildManagedEdges(project: Project, managed: ManagedKnowledgeGraph): void {
   for (const { edge } of managed.edges) project.stageManager.delete(edge);
   const edges: ManagedKnowledgeGraph["edges"] = [];
-  for (const bundle of relationBundles(managed.snapshot)) {
+  const directRelations = managed.snapshot.relations.filter((relation) => !relation.bridgeModuleId);
+  for (const bundle of relationBundles({ ...managed.snapshot, relations: directRelations })) {
     if (!bundle.primary) continue;
     const source = managed.nodes.get(bundle.primary.source);
     const target = managed.nodes.get(bundle.primary.target);
     if (!source || !target) continue;
-    edges.push({ edge: addEdge(project, source, target, bundle.primary, bundle), relation: bundle.primary });
+    edges.push({
+      edge: addEdge(project, source, target, bundle.primary, bundle),
+      sourceId: bundle.primary.source,
+      targetId: bundle.primary.target,
+      relation: bundle.primary,
+    });
+  }
+  for (const module of managed.snapshot.bridgeModules ?? []) {
+    const headerId = bridgeEntityId(module.id);
+    const header = managed.nodes.get(headerId);
+    if (module.collapsed) {
+      const source = module.sourceId ? managed.nodes.get(module.sourceId) : undefined;
+      const target = module.targetId ? managed.nodes.get(module.targetId) : undefined;
+      if (source && header) {
+        edges.push({
+          edge: addModuleEdge(project, source, header, `kb:bridge-edge:${module.id}:source`, "桥梁模块"),
+          sourceId: module.sourceId!,
+          targetId: headerId,
+        });
+      }
+      if (header && target) {
+        edges.push({
+          edge: addModuleEdge(project, header, target, `kb:bridge-edge:${module.id}:target`, ""),
+          sourceId: headerId,
+          targetId: module.targetId!,
+        });
+      }
+      continue;
+    }
+    const stepIds = module.steps.map((step) => bridgeEntityId(module.id, step.id));
+    const chain = [module.sourceId, ...stepIds, module.targetId].filter((id): id is string => Boolean(id));
+    for (let index = 0; index < chain.length - 1; index++) {
+      const sourceId = chain[index]!;
+      const targetId = chain[index + 1]!;
+      const source = managed.nodes.get(sourceId);
+      const target = managed.nodes.get(targetId);
+      if (!source || !target) continue;
+      edges.push({
+        edge: addModuleEdge(
+          project,
+          source,
+          target,
+          `kb:bridge-edge:${module.id}:${index}`,
+          index === 0 ? "桥梁步骤" : "",
+        ),
+        sourceId,
+        targetId,
+      });
+    }
   }
   managed.edges = edges;
   managed.mountedEdgeIds = new Set(edges.map(({ edge }) => edge.uuid));
@@ -191,6 +355,7 @@ function materializeViewportNodes(project: Project, managed: ManagedKnowledgeGra
     const node = createNode(project, projectedNode(managed.snapshot, item));
     project.stageManager.add(node, true);
     managed.nodes.set(item.id, node);
+    managed.baseNodeIds.add(item.id);
     managed.mountedNodeIds.add(item.id);
     managed.ledgerPositions.set(item.id, { x: item.x, y: item.y });
     changed = true;
@@ -216,6 +381,7 @@ export function synchronizeKnowledgeBridgeCanvas(project: Project, snapshot: Vau
       ? new Set(snapshot.nodes.map((node) => node.id))
       : new Set([...(previous?.nodes.keys() ?? []), ...viewportNodeIds(project, spatialIndex)]);
   const nodes = new Map<string, TextNode>();
+  const baseNodeIds = new Set<string>();
   const mountedNodeIds = new Set<string>();
   const ledgerPositions = new Map<string, { x: number; y: number }>();
   for (const item of snapshot.nodes) {
@@ -231,7 +397,20 @@ export function synchronizeKnowledgeBridgeCanvas(project: Project, snapshot: Vau
       if (previous?.mountedNodeIds.has(item.id)) mountedNodeIds.add(item.id);
     }
     nodes.set(item.id, node);
+    baseNodeIds.add(item.id);
     ledgerPositions.set(item.id, { x: item.x, y: item.y });
+  }
+  for (const entity of bridgeCanvasEntities(snapshot)) {
+    const existing = previous?.nodes.get(entity.id);
+    const node = existing ?? createBridgeEntity(project, entity);
+    if (!existing) {
+      project.stageManager.add(node, true);
+      mountedNodeIds.add(entity.id);
+    } else {
+      updateBridgeEntity(node, entity);
+      if (previous?.mountedNodeIds.has(entity.id)) mountedNodeIds.add(entity.id);
+    }
+    nodes.set(entity.id, node);
   }
   for (const [nodeId, node] of previous?.nodes ?? []) {
     if (!nodes.has(nodeId)) project.stageManager.delete(node);
@@ -241,6 +420,7 @@ export function synchronizeKnowledgeBridgeCanvas(project: Project, snapshot: Vau
     signature,
     snapshot,
     nodes,
+    baseNodeIds,
     edges: [],
     mountedNodeIds,
     mountedEdgeIds: new Set(),
@@ -286,8 +466,7 @@ export function updateKnowledgeBridgeSemanticZoom(project: Project): void {
   }
 
   for (const entry of managed.edges) {
-    const hidden =
-      projection.hiddenNodeIds.has(entry.relation.source) || projection.hiddenNodeIds.has(entry.relation.target);
+    const hidden = projection.hiddenNodeIds.has(entry.sourceId) || projection.hiddenNodeIds.has(entry.targetId);
     const mounted = managed.mountedEdgeIds.has(entry.edge.uuid);
     if (hidden && mounted) {
       project.stageManager.delete(entry.edge);
@@ -298,13 +477,12 @@ export function updateKnowledgeBridgeSemanticZoom(project: Project): void {
       managed.mountedEdgeIds.add(entry.edge.uuid);
       referencesChanged = true;
     }
-    if (!hidden) {
+    if (!hidden && entry.relation) {
       const involvesDetail =
         projection.detailOpacity < 1 &&
         managed.snapshot.nodes.some(
           (node) =>
-            (node.id === entry.relation.source || node.id === entry.relation.target) &&
-            (node.role === "L3" || node.role === "L4"),
+            (node.id === entry.sourceId || node.id === entry.targetId) && (node.role === "L3" || node.role === "L4"),
         );
       const opacity = involvesDetail ? projection.detailOpacity : 1;
       entry.edge.color = primaryColor(entry.relation).toNewAlpha(0.96 * opacity);
@@ -316,11 +494,37 @@ export function updateKnowledgeBridgeSemanticZoom(project: Project): void {
 export function readKnowledgeBridgeCanvasPositions(project: Project): KnowledgeNodePosition[] {
   const managed = managedGraphs.get(project);
   if (!managed) return [];
-  return [...managed.nodes.entries()].map(([id, node]) => ({
-    id,
-    x: node.rectangle.location.x,
-    y: node.rectangle.location.y,
-  }));
+  return [...managed.nodes.entries()].flatMap(([id, node]) =>
+    managed.baseNodeIds.has(id)
+      ? [
+          {
+            id,
+            x: node.rectangle.location.x,
+            y: node.rectangle.location.y,
+          },
+        ]
+      : [],
+  );
+}
+
+export function readKnowledgeBridgeModulePositions(project: Project): BridgeModulePosition[] {
+  const managed = managedGraphs.get(project);
+  if (!managed) return [];
+  return (managed.snapshot.bridgeModules ?? []).flatMap((module) => {
+    const header = managed.nodes.get(bridgeEntityId(module.id));
+    if (!header) return [];
+    return [
+      {
+        id: module.id,
+        x: header.rectangle.location.x,
+        y: header.rectangle.location.y,
+        steps: module.steps.flatMap((step) => {
+          const node = managed.nodes.get(bridgeEntityId(module.id, step.id));
+          return node ? [{ id: step.id, x: node.rectangle.location.x, y: node.rectangle.location.y }] : [];
+        }),
+      },
+    ];
+  });
 }
 
 export function readChangedKnowledgeBridgeCanvasDetails(project: Project): KnowledgeNodeDetails[] {
